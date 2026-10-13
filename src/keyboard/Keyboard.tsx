@@ -4,6 +4,7 @@ import React, {
   useContext,
   useEffect,
   useMemo,
+  useRef,
   useState,
 } from "react";
 
@@ -31,6 +32,8 @@ import { LockStateContext } from "../rpc/LockStateContext";
 import { LockState } from "@zmkfirmware/zmk-studio-ts-client/core";
 import { deserializeLayoutZoom, LayoutZoom } from "./PhysicalLayout";
 import { useLocalStorageState } from "../misc/useLocalStorageState";
+import { KeymapBackupControls } from "./KeymapBackupControls";
+import { KeyboardOverlayControls } from "../overlay/KeyboardOverlayControls";
 
 type BehaviorMap = Record<number, GetBehaviorDetailsResponse>;
 
@@ -158,7 +161,7 @@ function useLayouts(): [
   ];
 }
 
-export default function Keyboard() {
+export default function Keyboard({ deviceName = "zmk" }: { deviceName?: string }) {
   const [
     layouts,
     _setLayouts,
@@ -183,6 +186,8 @@ export default function Keyboard() {
     number | undefined
   >(undefined);
   const behaviors = useBehaviors();
+  const [bindingUpdatePending, setBindingUpdatePending] = useState(false);
+  const bindingUpdateInProgress = useRef(false);
 
   const conn = useContext(ConnectionContext);
   const undoRedo = useContext(UndoRedoContext);
@@ -230,8 +235,9 @@ export default function Keyboard() {
     [undoRedo, selectedPhysicalLayoutIndex]
   );
 
-  let doUpdateBinding = useCallback(
-    (binding: BehaviorBinding) => {
+  const doUpdateBinding = useCallback(
+    async (binding: BehaviorBinding) => {
+      if (bindingUpdateInProgress.current) return;
       if (!keymap || selectedKeyPosition === undefined) {
         console.error(
           "Can't update binding without a selected key position and loaded keymap"
@@ -243,13 +249,17 @@ export default function Keyboard() {
       const layerId = keymap.layers[layer].id;
       const keyPosition = selectedKeyPosition;
       const oldBinding = keymap.layers[layer].bindings[keyPosition];
-      undoRedo?.(async () => {
+      if (!undoRedo) {
+        window.alert("Keymap editing is unavailable.");
+        return;
+      }
+      const changeBinding = async (newBinding: BehaviorBinding) => {
         if (!conn.conn) {
           throw new Error("Not connected");
         }
 
-        let resp = await call_rpc(conn.conn, {
-          keymap: { setLayerBinding: { layerId, keyPosition, binding } },
+        const resp = await call_rpc(conn.conn, {
+          keymap: { setLayerBinding: { layerId, keyPosition, binding: newBinding } },
         });
 
         if (
@@ -257,39 +267,43 @@ export default function Keyboard() {
           SetLayerBindingResponse.SET_LAYER_BINDING_RESP_OK
         ) {
           setKeymap(
-            produce((draft: any) => {
-              draft.layers[layer].bindings[keyPosition] = binding;
+            produce((draft: Keymap | undefined) => {
+              if (draft) draft.layers[layer].bindings[keyPosition] = newBinding;
             })
           );
         } else {
-          console.error("Failed to set binding", resp.keymap?.setLayerBinding);
+          throw new Error(`Failed to set binding (response ${resp.keymap?.setLayerBinding}).`);
         }
+      };
 
-        return async () => {
-          if (!conn.conn) {
-            return;
-          }
-
-          let resp = await call_rpc(conn.conn, {
-            keymap: {
-              setLayerBinding: { layerId, keyPosition, binding: oldBinding },
-            },
-          });
-          if (
-            resp.keymap?.setLayerBinding ===
-            SetLayerBindingResponse.SET_LAYER_BINDING_RESP_OK
-          ) {
-            setKeymap(
-              produce((draft: any) => {
-                draft.layers[layer].bindings[keyPosition] = oldBinding;
-              })
-            );
-          } else {
-          }
-        };
-      });
+      bindingUpdateInProgress.current = true;
+      setBindingUpdatePending(true);
+      try {
+        await undoRedo(async () => {
+          await changeBinding(binding);
+          return async () => {
+            bindingUpdateInProgress.current = true;
+            setBindingUpdatePending(true);
+            try {
+              await changeBinding(oldBinding);
+            } finally {
+              bindingUpdateInProgress.current = false;
+              setBindingUpdatePending(false);
+            }
+          };
+        });
+      } catch (error) {
+        console.error("Failed to update key binding", error);
+        window.alert(error instanceof Error ? error.message : String(error));
+        setKeymap(produce((draft: Keymap | undefined) => {
+          if (draft) draft.layers[layer].bindings[keyPosition] = { ...oldBinding };
+        }));
+      } finally {
+        bindingUpdateInProgress.current = false;
+        setBindingUpdatePending(false);
+      }
     },
-    [conn, keymap, undoRedo, selectedLayerIndex, selectedKeyPosition]
+    [conn, keymap, undoRedo, selectedLayerIndex, selectedKeyPosition, setKeymap]
   );
 
   let selectedBinding = useMemo(() => {
@@ -501,8 +515,8 @@ export default function Keyboard() {
   }, [keymap, selectedLayerIndex]);
 
   return (
-    <div className="grid grid-cols-[auto_1fr] grid-rows-[1fr_minmax(10em,auto)] bg-base-300 max-w-full min-w-0 min-h-0">
-      <div className="p-2 flex flex-col gap-2 bg-base-200 row-span-2">
+    <div className="grid grid-cols-[auto_1fr] grid-rows-[minmax(0,1fr)_auto] bg-base-300 max-w-full min-w-0 min-h-0">
+      <div className="p-2 flex flex-col gap-2 bg-base-200 row-span-2 min-h-0 overflow-y-auto">
         {layouts && (
           <div className="col-start-3 row-start-1 row-end-2">
             <PhysicalLayoutPicker
@@ -527,6 +541,23 @@ export default function Keyboard() {
               onLayerNameChanged={changeLayerName}
             />
           </div>
+        )}
+        {keymap && layouts?.[selectedPhysicalLayoutIndex] && (
+          <KeymapBackupControls
+            keymap={keymap}
+            layout={layouts[selectedPhysicalLayoutIndex]}
+            behaviors={behaviors}
+            deviceName={deviceName}
+            onKeymapChanged={setKeymap}
+          />
+        )}
+        {keymap && layouts?.[selectedPhysicalLayoutIndex] && (
+          <KeyboardOverlayControls
+            keymap={keymap}
+            layout={layouts[selectedPhysicalLayoutIndex]}
+            behaviors={behaviors}
+            deviceName={deviceName}
+          />
         )}
       </div>
       {layouts && keymap && behaviors && (
@@ -560,8 +591,10 @@ export default function Keyboard() {
         </div>
       )}
       {keymap && selectedBinding && (
-        <div className="p-2 col-start-2 row-start-2 bg-base-200">
+        <div className="p-2 col-start-2 row-start-2 bg-base-200 min-w-0 max-h-[50vh] overflow-auto">
           <BehaviorBindingPicker
+            key={`${selectedLayerIndex}-${selectedKeyPosition}`}
+            isDisabled={bindingUpdatePending}
             binding={selectedBinding}
             behaviors={Object.values(behaviors)}
             layers={keymap.layers.map(({ id, name }, li) => ({

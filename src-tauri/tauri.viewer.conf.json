@@ -1,0 +1,32 @@
+{
+  "productName": "ZMK Keyboard Viewer",
+  "mainBinaryName": "zmk-keyboard-viewer",
+  "identifier": "dev.zmk.keyboard-viewer",
+  "build": {
+    "beforeBuildCommand": "npm run build:viewer",
+    "beforeDevCommand": "npm run dev:viewer",
+    "devUrl": "http://localhost:5174/viewer.html",
+    "frontendDist": "../dist-viewer"
+  },
+  "bundle": {
+    "active": false
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "url": "viewer.html",
+        "title": "ZMK Keyboard Viewer",
+        "width": 1050,
+        "height": 440,
+        "minWidth": 500,
+        "minHeight": 250,
+        "resizable": true,
+        "alwaysOnTop": true,
+        "transparent": true,
+        "decorations": false,
+        "shadow": false
+      }
+    ]
+  }
+}

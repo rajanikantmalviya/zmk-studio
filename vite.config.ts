@@ -32,6 +32,7 @@ export default defineConfig({
       input: {
         main: "./index.html",
         download: "./download.html",
+        overlay: "./overlay.html",
       },
     }
   },

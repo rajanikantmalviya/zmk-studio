@@ -1,4 +1,4 @@
-import { createContext, useMemo, useState } from "react";
+import { createContext, useMemo, useRef, useState } from "react";
 
 export type UndoCallback = () => Promise<void>;
 
@@ -13,6 +13,7 @@ export function useUndoRedo(): [
   () => void
 ] {
   const [locked, setLocked] = useState<boolean>(false);
+  const operationInProgress = useRef(false);
   const [undoStack, setUndoStack] = useState<Array<[DoCallback, UndoCallback]>>(
     []
   );
@@ -28,18 +29,25 @@ export function useUndoRedo(): [
   );
 
   const doIt = async (doCb: DoCallback, preserveRedo?: boolean) => {
-    setLocked(true);
-    let undo = await doCb();
-
-    setUndoStack([[doCb, undo], ...undoStack]);
-    if (!preserveRedo) {
-      setRedoStack([]);
+    if (operationInProgress.current) {
+      throw new Error("operation invoked when existing operation in progress");
     }
-    setLocked(false);
+    operationInProgress.current = true;
+    setLocked(true);
+    try {
+      const undo = await doCb();
+      setUndoStack([[doCb, undo], ...undoStack]);
+      if (!preserveRedo) {
+        setRedoStack([]);
+      }
+    } finally {
+      operationInProgress.current = false;
+      setLocked(false);
+    }
   };
 
   const undo = async () => {
-    if (locked) {
+    if (operationInProgress.current) {
       throw new Error("undo invoked when existing operation in progress");
     }
 
@@ -47,18 +55,21 @@ export function useUndoRedo(): [
       throw new Error("undo invoked with no operations to undo");
     }
 
+    operationInProgress.current = true;
     setLocked(true);
-    let [doCb, undoCb] = undoStack[0];
-    setUndoStack(undoStack.slice(1));
-    setRedoStack([doCb, ...redoStack]);
-
-    await undoCb();
-
-    setLocked(false);
+    const [doCb, undoCb] = undoStack[0];
+    try {
+      await undoCb();
+      setUndoStack(undoStack.slice(1));
+      setRedoStack([doCb, ...redoStack]);
+    } finally {
+      operationInProgress.current = false;
+      setLocked(false);
+    }
   };
 
   const redo = async () => {
-    if (locked) {
+    if (operationInProgress.current) {
       throw new Error("redo invoked when existing operation in progress");
     }
 
@@ -66,11 +77,10 @@ export function useUndoRedo(): [
       throw new Error("redo invoked with no operations to redo");
     }
 
-    let doCb = redoStack[0];
+    const doCb = redoStack[0];
 
+    await doIt(doCb, true);
     setRedoStack(redoStack.slice(1));
-
-    return await doIt(doCb, true);
   };
 
   const reset = () => {

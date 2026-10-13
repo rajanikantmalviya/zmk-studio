@@ -17,20 +17,23 @@ import {
   hid_usage_from_page_and_id,
   hid_usage_page_get_ids,
 } from "../hid-usages";
-import { useCallback, useMemo } from "react";
+import { useCallback, useId, useMemo } from "react";
 import { ChevronDown } from "lucide-react";
+import { VirtualKeyboard } from "./VirtualKeyboard";
+import {
+  HidUsagePage,
+  isUsageAllowed,
+  withImplicitModifiers,
+} from "./virtualKeys";
 
-export interface HidUsagePage {
-  id: number;
-  min?: number;
-  max?: number;
-}
+export type { HidUsagePage } from "./virtualKeys";
 
 export interface HidUsagePickerProps {
   label?: string;
   value?: number;
   usagePages: HidUsagePage[];
   onValueChanged: (value?: number) => void;
+  showVirtualKeyboard?: boolean;
 }
 
 type UsageSectionProps = HidUsagePage;
@@ -38,15 +41,13 @@ type UsageSectionProps = HidUsagePage;
 const UsageSection = ({ id, min, max }: UsageSectionProps) => {
   const info = useMemo(() => hid_usage_page_get_ids(id), [id]);
 
-  let usages = useMemo(() => {
+  const usages = useMemo(() => {
     let usages = info?.UsageIds || [];
-    if (max || min) {
-      usages = usages.filter(
-        (i) =>
-          (i.Id <= (max || Number.MAX_SAFE_INTEGER) && i.Id >= (min || 0)) ||
-          (id === 7 && i.Id >= 0xe0 && i.Id <= 0xe7)
-      );
-    }
+    usages = usages.filter((usage) =>
+      isUsageAllowed(hid_usage_from_page_and_id(id, usage.Id), [
+        { id, min, max },
+      ]),
+    );
 
     return usages;
   }, [id, min, max, info]);
@@ -106,7 +107,7 @@ function mods_to_flags(mods: Mods[]): number {
 }
 
 function mask_mods(value: number) {
-  return value & ~(mods_to_flags(all_mods) << 24);
+  return value & 0x00ffffff;
 }
 
 export const HidUsagePicker = ({
@@ -114,9 +115,11 @@ export const HidUsagePicker = ({
   value,
   usagePages,
   onValueChanged,
+  showVirtualKeyboard = true,
 }: HidUsagePickerProps) => {
+  const labelId = useId();
   const mods = useMemo(() => {
-    let flags = value ? value >> 24 : 0;
+    const flags = value ? value >> 24 : 0;
 
     return all_mods.filter((m) => m & flags).map((m) => m.toLocaleString());
   }, [value]);
@@ -125,13 +128,13 @@ export const HidUsagePicker = ({
     (e: Key | null) => {
       let value = typeof e == "number" ? e : undefined;
       if (value !== undefined) {
-        let mod_flags = mods_to_flags(mods.map((m) => parseInt(m)));
-        value = value | (mod_flags << 24);
+        const mod_flags = mods_to_flags(mods.map((m) => parseInt(m)));
+        value = withImplicitModifiers(value, mod_flags);
       }
 
       onValueChanged(value);
     },
-    [onValueChanged, mods]
+    [onValueChanged, mods],
   );
 
   const modifiersChanged = useCallback(
@@ -140,53 +143,66 @@ export const HidUsagePicker = ({
         return;
       }
 
-      let mod_flags = mods_to_flags(m.map((m) => parseInt(m)));
-      let new_value = mask_mods(value) | (mod_flags << 24);
+      const mod_flags = mods_to_flags(m.map((m) => parseInt(m)));
+      const new_value = withImplicitModifiers(value, mod_flags);
       onValueChanged(new_value);
     },
-    [value]
+    [value, onValueChanged],
   );
 
   return (
-    <div className="flex gap-2 relative">
-      {label && <Label id="hid-usage-picker">{label}:</Label>}
-      <ComboBox
-        selectedKey={value ? mask_mods(value) : null}
-        onSelectionChange={selectionChanged}
-        aria-labelledby="hid-usage-picker"
-      >
-        <div className="flex">
-          <Input className="p-1 rounded-l" />
-          <Button className="rounded-r bg-primary text-primary-content w-8 h-8 flex justify-center items-center">
-            <ChevronDown className="size-4" />
-          </Button>
-        </div>
-        <Popover className="w-[var(--trigger-width)] max-h-4 shadow-md text-base-content rounded border-base-content bg-base-100">
-          <ListBox
-            items={usagePages}
-            className="block max-h-[30vh] min-h-[unset] overflow-auto p-2"
-            selectionMode="single"
-          >
-            {({ id, min, max }) => <UsageSection id={id} min={min} max={max} />}
-          </ListBox>
-        </Popover>
-      </ComboBox>
-      <CheckboxGroup
-        aria-label="Implicit Modifiers"
-        className="grid grid-flow-col gap-x-px auto-cols-[minmax(min-content,1fr)] content-stretch divide-x rounded-md"
-        value={mods}
-        onChange={modifiersChanged}
-      >
-        {all_mods.map((m) => (
-          <Checkbox
-            key={m}
-            value={m.toLocaleString()}
-            className="text-nowrap cursor-pointer grid px-2 content-center justify-center rac-selected:bg-primary border-base-100 bg-base-300 hover:bg-base-100 first:rounded-s-md last:rounded-e-md rac-selected:text-primary-content"
-          >
-            {mod_labels[m]}
-          </Checkbox>
-        ))}
-      </CheckboxGroup>
+    <div className="flex flex-col gap-2 min-w-0">
+      {showVirtualKeyboard && (
+        <VirtualKeyboard
+          value={value}
+          usagePages={usagePages}
+          onValueChanged={selectionChanged}
+        />
+      )}
+      <div className="flex flex-wrap gap-2 items-center relative">
+        {label && <Label id={labelId}>{label}:</Label>}
+        <ComboBox
+          selectedKey={value ? mask_mods(value) : null}
+          onSelectionChange={selectionChanged}
+          aria-labelledby={label ? labelId : undefined}
+          aria-label={label ? undefined : "Key code"}
+        >
+          <div className="flex">
+            <Input className="p-1 rounded-l" />
+            <Button className="rounded-r bg-primary text-primary-content w-8 h-8 flex justify-center items-center">
+              <ChevronDown className="size-4" />
+            </Button>
+          </div>
+          <Popover className="w-[var(--trigger-width)] max-h-4 shadow-md text-base-content rounded border-base-content bg-base-100">
+            <ListBox
+              items={usagePages}
+              className="block max-h-[30vh] min-h-[unset] overflow-auto p-2"
+              selectionMode="single"
+            >
+              {({ id, min, max }) => (
+                <UsageSection id={id} min={min} max={max} />
+              )}
+            </ListBox>
+          </Popover>
+        </ComboBox>
+        <CheckboxGroup
+          aria-label="Implicit Modifiers"
+          className="grid grid-flow-col gap-x-px auto-cols-[minmax(min-content,1fr)] content-stretch divide-x rounded-md"
+          value={mods}
+          onChange={modifiersChanged}
+          isDisabled={value === undefined || value === 0}
+        >
+          {all_mods.map((m) => (
+            <Checkbox
+              key={m}
+              value={m.toLocaleString()}
+              className="text-nowrap cursor-pointer grid px-2 content-center justify-center rac-selected:bg-primary border-base-100 bg-base-300 hover:bg-base-100 first:rounded-s-md last:rounded-e-md rac-selected:text-primary-content"
+            >
+              {mod_labels[m]}
+            </Checkbox>
+          ))}
+        </CheckboxGroup>
+      </div>
     </div>
   );
 };

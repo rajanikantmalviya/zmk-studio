@@ -179,7 +179,7 @@ function App() {
   });
 
   useEffect(() => {
-    if (!conn) {
+    if (!conn.conn) {
       reset();
       setLockState(LockState.ZMK_STUDIO_CORE_LOCK_STATE_LOCKED);
     }
@@ -201,6 +201,15 @@ function App() {
 
     updateLockState();
   }, [conn, setLockState]);
+
+  const runHistoryAction = async (action: () => Promise<void>) => {
+    try {
+      await action();
+    } catch (error) {
+      console.error("Keymap history operation failed", error);
+      window.alert(error instanceof Error ? error.message : String(error));
+    }
+  };
 
   const save = useCallback(() => {
     async function doSave() {
@@ -300,14 +309,14 @@ function App() {
               connectedDeviceLabel={connectedDeviceName}
               canUndo={canUndo}
               canRedo={canRedo}
-              onUndo={undo}
-              onRedo={redo}
+              onUndo={() => runHistoryAction(undo)}
+              onRedo={() => runHistoryAction(redo)}
               onSave={save}
               onDiscard={discard}
               onDisconnect={disconnect}
               onResetSettings={resetSettings}
             />
-            <Keyboard />
+            <Keyboard deviceName={connectedDeviceName} />
             <AppFooter
               onShowAbout={() => setShowAbout(true)}
               onShowLicenseNotice={() => setShowLicenseNotice(true)}

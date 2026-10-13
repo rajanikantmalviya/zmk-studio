@@ -68,8 +68,9 @@ pub async fn serial_connect(
 }
 
 #[command]
-pub async fn serial_list_devices(app_handle: AppHandle) -> Result<Vec<super::commands::AvailableDevice>, ()> {
-    let ports = unblock(|| available_ports()).await.unwrap();
+pub async fn serial_list_devices(app_handle: AppHandle) -> Result<Vec<super::commands::AvailableDevice>, String> {
+    let ports = unblock(|| available_ports()).await
+        .map_err(|error| format!("Could not list USB serial devices: {error}"))?;
 
     let mut candidates = ports
         .into_iter()

@@ -1,0 +1,169 @@
+:root {
+  font-family: system-ui, sans-serif;
+  color: #e2e8f0;
+  background: transparent;
+  font-size: 13px;
+  color-scheme: dark;
+}
+* {
+  box-sizing: border-box;
+}
+body {
+  margin: 0;
+  background: transparent;
+}
+.viewer {
+  padding: 12px;
+  background: #111827;
+  min-height: 100vh;
+}
+.viewer.typing-overlay {
+  background: transparent;
+  min-height: 0;
+  height: 100vh;
+  overflow: hidden;
+  user-select: none;
+}
+.typing-overlay header,
+.typing-overlay footer {
+  display: none;
+}
+.typing-overlay .viewer-combos {
+  margin-top: 8px;
+  max-height: 260px;
+  overflow: auto;
+  border-radius: 6px;
+  padding: 8px;
+  background: #111827ee;
+}
+.viewer-drag {
+  border: 0;
+  background: transparent;
+  cursor: move;
+}
+.viewer-layer-label {
+  margin-top: 8px;
+  height: 20px;
+  line-height: 20px;
+  text-align: center;
+  font-size: 12px;
+  color: #f1f5f9;
+  text-shadow:
+    0 1px 3px #000,
+    0 0 4px #000;
+}
+header {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+button,
+select {
+  font: inherit;
+  border: 1px solid #475569;
+  background: #1e293b;
+  color: inherit;
+  border-radius: 5px;
+  padding: 5px 9px;
+}
+button {
+  cursor: pointer;
+}
+button:hover:not(:disabled),
+button[aria-pressed="true"] {
+  background: #334155;
+}
+button:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+select {
+  max-width: 320px;
+}
+.viewer-tools {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin-left: auto;
+}
+.viewer-tools label {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.viewer-keyboard-scroll {
+  overflow: auto;
+  padding: 16px 0;
+}
+.viewer-keyboard {
+  display: block;
+  margin: auto;
+  height: auto;
+  max-width: 100%;
+}
+.typing-overlay .viewer-keyboard-scroll {
+  overflow: hidden;
+  padding: 0;
+}
+.viewer-keyboard rect {
+  fill: #1e293b;
+  stroke: #64748b;
+  stroke-width: 0.025;
+}
+.viewer-keyboard text {
+  text-anchor: middle;
+  dominant-baseline: middle;
+  fill: #f1f5f9;
+  pointer-events: none;
+}
+.viewer-keyboard .key-hold {
+  fill: #94a3b8;
+}
+.viewer-keyboard .key-down rect {
+  fill: #166534;
+  stroke: #4ade80;
+}
+.viewer-keyboard .key-released rect {
+  fill: #1e40af;
+  stroke: #60a5fa;
+}
+.viewer-keyboard .key-down .key-hold {
+  fill: #bbf7d0;
+}
+.viewer-error {
+  color: #fecaca;
+  background: #7f1d1d;
+  padding: 10px;
+  border-radius: 5px;
+}
+.viewer-help {
+  max-width: 720px;
+  line-height: 1.6;
+  color: #cbd5e1;
+}
+.viewer-combos {
+  border-top: 1px solid #334155;
+  padding-top: 8px;
+}
+h2 {
+  font-size: 14px;
+}
+table {
+  border-collapse: collapse;
+  width: 100%;
+}
+th,
+td {
+  padding: 6px 10px;
+  text-align: left;
+  border-bottom: 1px solid #334155;
+}
+footer {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+  color: #94a3b8;
+  font-size: 11px;
+}
