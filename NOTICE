@@ -12,3 +12,12 @@ distributed under the License is distributed on an "AS IS" BASIS,
 WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
+
+This product vendors the MIT-licensed ZMK Studio TypeScript custom protocol
+client from cormoran/zmk-studio-ts-client, commit
+3a759c4bd259d8d8f7c3783a9fa90a3048adfc47.
+See vendor/zmk-studio-ts-client/LICENSE and PROVENANCE.
+Runtime combo/macro protobuf schemas are MIT-licensed community module sources:
+cormoran/zmk-feature-runtime-combo d9490e7b5d41c516221d131241009e81740efcee
+cormoran/zmk-feature-runtime-macro 38530962eb7061b60efcb98e84585cfb1f0cb6de.
+See src/runtime/proto/LICENSE and src/runtime/proto/PROVENANCE.

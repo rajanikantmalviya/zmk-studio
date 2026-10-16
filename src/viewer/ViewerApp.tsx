@@ -15,6 +15,9 @@ import {
   viewerShortcuts,
   viewerShortcutEdges,
   ViewerShortcuts,
+  ViewerPanel,
+  toggleViewerPanel,
+  macroStepLabel,
 } from "./model";
 
 interface Port {
@@ -29,6 +32,11 @@ interface DisconnectedEvent {
   connectionId: number;
   error: string;
 }
+interface ConfigurationEvent {
+  connectionId: number;
+  frames: unknown[];
+  initialState: unknown;
+}
 
 export function ViewerApp() {
   const [ports, setPorts] = useState<Port[]>([]);
@@ -37,12 +45,19 @@ export function ViewerApp() {
   const [snapshot, setSnapshot] = useState<ViewerSnapshot>();
   const [released, setReleased] = useState<Map<number, number>>(new Map());
   const [size, setSize] = useState(100);
-  const [combos, setCombos] = useState(false);
+  const [panel, setPanel] = useState<ViewerPanel>();
+  const combos = panel === "combos";
+  const macros = panel === "macros";
+  const [transport, setTransport] = useState<"usb" | "ble">("usb");
   const [onTop, setOnTop] = useState(true);
   const [typing, setTyping] = useState(false);
   const [combosHeight, setCombosHeight] = useState(0);
   const combosPanel = useRef<HTMLElement>(null);
-  const shortcuts = useRef<ViewerShortcuts>({ display: false, combos: false });
+  const shortcuts = useRef<ViewerShortcuts>({
+    display: false,
+    combos: false,
+    macros: false,
+  });
   const [pixelRatio, setPixelRatio] = useState(window.devicePixelRatio);
   const [busy, setBusy] = useState(true);
   const [error, setError] = useState<string>();
@@ -50,6 +65,7 @@ export function ViewerApp() {
   const connectionId = useRef<number>();
   const pendingState = useRef<StateEvent>();
   const pendingDisconnect = useRef<DisconnectedEvent>();
+  const pendingConfiguration = useRef<ConfigurationEvent>();
   const mounted = useRef(false);
   const generation = useRef({ value: 0 });
   const windowChanges = useRef(Promise.resolve());
@@ -62,7 +78,9 @@ export function ViewerApp() {
     setBusy(true);
     setError(undefined);
     try {
-      const available = await invoke<Port[]>("serial_list_devices");
+      const available = await invoke<Port[]>(
+        transport === "ble" ? "viewer_ble_list_devices" : "serial_list_devices",
+      );
       if (mounted.current) {
         setPorts(available);
         setPort((previous) =>
@@ -76,16 +94,24 @@ export function ViewerApp() {
     } finally {
       if (mounted.current) setBusy(false);
     }
-  }, [report]);
+  }, [report, transport]);
+  const togglePanel = useCallback(
+    (requested: Exclude<ViewerPanel, undefined>) => {
+      setPanel((previous) => toggleViewerPanel(previous, requested));
+      setTyping(true);
+    },
+    [],
+  );
   const applyShortcuts = useCallback(
     (next: ViewerSnapshot, current: ViewerConfiguration) => {
       const held = viewerShortcuts(current, next);
       const edges = viewerShortcutEdges(shortcuts.current, held);
       shortcuts.current = held;
       if (edges.display) invoke("viewer_toggle_display").catch(report);
-      if (edges.combos) setCombos((previous) => !previous);
+      if (edges.combos) togglePanel("combos");
+      if (edges.macros) togglePanel("macros");
     },
-    [report],
+    [report, togglePanel],
   );
 
   useEffect(() => {
@@ -98,16 +124,51 @@ export function ViewerApp() {
     const start = async () => {
       for (const subscribe of [
         () =>
+          listen("viewer-hidden", () => {
+            if (!disposed) setPanel(undefined);
+          }),
+        () =>
           listen("viewer-controls", () => {
             if (!disposed) setTyping(false);
           }),
         () =>
           listen("viewer-display", () => {
-            if (!disposed && configuration.current) setTyping(true);
+            if (!disposed && configuration.current) {
+              setPanel(undefined);
+              setTyping(true);
+            }
           }),
         () =>
           listen<string>("viewer-window-error", ({ payload }) => {
             if (!disposed) report(payload);
+          }),
+        () =>
+          listen<ConfigurationEvent>("viewer-configuration", ({ payload }) => {
+            if (disposed) return;
+            if (connectionId.current === undefined) {
+              pendingConfiguration.current = payload;
+              return;
+            }
+            if (payload.connectionId !== connectionId.current) return;
+            try {
+              const next = parseConfiguration(payload.frames);
+              const initial = parseSnapshot(payload.initialState, next);
+              configuration.current = next;
+              setConfig(next);
+              setSnapshot(initial);
+              shortcuts.current = viewerShortcuts(next, initial);
+              setReleased(new Map());
+            } catch (cause) {
+              connectionId.current = undefined;
+              configuration.current = undefined;
+              setConfig(undefined);
+              setSnapshot(undefined);
+              setReleased(new Map());
+              setPanel(undefined);
+              setTyping(false);
+              report(cause);
+              invoke("viewer_disconnect").catch(report);
+            }
           }),
         () =>
           listen<StateEvent>("viewer-state", ({ payload }) => {
@@ -133,6 +194,8 @@ export function ViewerApp() {
               configuration.current = undefined;
               setConfig(undefined);
               setSnapshot(undefined);
+              setPanel(undefined);
+              setTyping(false);
               report(cause);
               invoke("viewer_disconnect").catch(report);
             }
@@ -150,7 +213,12 @@ export function ViewerApp() {
             setConfig(undefined);
             setSnapshot(undefined);
             setReleased(new Map());
-            shortcuts.current = { display: false, combos: false };
+            shortcuts.current = {
+              display: false,
+              combos: false,
+              macros: false,
+            };
+            setPanel(undefined);
             setTyping(false);
             report(payload.error);
           }),
@@ -199,7 +267,8 @@ export function ViewerApp() {
     setConfig(undefined);
     setSnapshot(undefined);
     setReleased(new Map());
-    shortcuts.current = { display: false, combos: false };
+    shortcuts.current = { display: false, combos: false, macros: false };
+    setPanel(undefined);
     try {
       await invoke("viewer_disconnect");
     } catch (cause) {
@@ -217,16 +286,20 @@ export function ViewerApp() {
         connectionId: number;
         frames: unknown[];
         initialState: unknown;
-      }>("viewer_connect", { id: port });
+      }>("viewer_connect", { id: port, transport });
       if (!mounted.current || generation.current.value !== current) return;
       if (pendingDisconnect.current?.connectionId === result.connectionId) {
         throw new Error(pendingDisconnect.current.error);
       }
-      const next = parseConfiguration(result.frames);
+      const refreshed =
+        pendingConfiguration.current?.connectionId === result.connectionId
+          ? pendingConfiguration.current
+          : result;
+      const next = parseConfiguration(refreshed.frames);
       const initial =
         pendingState.current?.connectionId === result.connectionId
           ? pendingState.current.state
-          : result.initialState;
+          : refreshed.initialState;
       const initialSnapshot = parseSnapshot(initial, next);
       shortcuts.current = viewerShortcuts(next, initialSnapshot);
       configuration.current = next;
@@ -235,6 +308,7 @@ export function ViewerApp() {
       setSnapshot(initialSnapshot);
       pendingState.current = undefined;
       pendingDisconnect.current = undefined;
+      pendingConfiguration.current = undefined;
       setReleased(new Map());
       setTyping(true);
     } catch (cause) {
@@ -257,7 +331,7 @@ export function ViewerApp() {
   const bounds = config && viewerBounds(config);
   useEffect(() => {
     const panel = combosPanel.current;
-    if (!combos || !panel) {
+    if (!panel) {
       setCombosHeight(0);
       return;
     }
@@ -267,7 +341,7 @@ export function ViewerApp() {
     observer.observe(panel);
     measure();
     return () => observer.disconnect();
-  }, [combos, config, typing]);
+  }, [panel, config, typing]);
   const overlaySize = config && viewerOverlaySize(config, size, combosHeight);
   const overlayWidth = overlaySize?.width ?? 0;
   const overlayHeight = overlaySize?.height ?? 0;
@@ -283,6 +357,7 @@ export function ViewerApp() {
           height: overlayHeight,
           pixelRatio,
           combosHeight,
+          interactive: panel !== undefined,
         });
       })
       .catch((cause) => {
@@ -300,6 +375,7 @@ export function ViewerApp() {
     overlayHeight,
     pixelRatio,
     combosHeight,
+    panel,
     report,
   ]);
   const keys = config && snapshot ? displayedKeys(config, snapshot) : [];
@@ -332,12 +408,35 @@ export function ViewerApp() {
         ) : (
           <>
             <select
-              aria-label="Viewer USB port"
+              aria-label="Viewer connection"
+              value={transport}
+              disabled={busy}
+              onChange={(event) => {
+                const value = event.target.value;
+                if (value === "usb" || value === "ble") {
+                  setPort("");
+                  setTransport(value);
+                }
+              }}
+            >
+              <option value="usb">USB</option>
+              <option value="ble">Bluetooth</option>
+            </select>
+            <select
+              aria-label={
+                transport === "ble"
+                  ? "Viewer Bluetooth keyboard"
+                  : "Viewer USB port"
+              }
               value={port}
               disabled={busy}
               onChange={(event) => setPort(event.target.value)}
             >
-              <option value="">Select viewer USB port</option>
+              <option value="">
+                {transport === "ble"
+                  ? "Select paired Bluetooth keyboard"
+                  : "Select viewer USB port"}
+              </option>
               {ports.map((candidate) => (
                 <option key={candidate.id} value={candidate.id}>
                   {candidate.id} - {candidate.label}
@@ -356,7 +455,10 @@ export function ViewerApp() {
           {config && (
             <button
               disabled={busy}
-              onClick={() => setTyping(true)}
+              onClick={() => {
+                setPanel(undefined);
+                setTyping(true);
+              }}
               title="Show only the keyboard, without intercepting clicks or focus"
             >
               Typing overlay
@@ -380,9 +482,16 @@ export function ViewerApp() {
           <button
             disabled={!config}
             aria-pressed={combos}
-            onClick={() => setCombos((previous) => !previous)}
+            onClick={() => togglePanel("combos")}
           >
             Combos
+          </button>
+          <button
+            disabled={!config}
+            aria-pressed={macros}
+            onClick={() => togglePanel("macros")}
+          >
+            Macros
           </button>
           <label>
             <input
@@ -416,14 +525,16 @@ export function ViewerApp() {
       )}
       {!config && (
         <p className="viewer-help">
-          Connect the left half over USB using viewer-enabled firmware. Select
+          Connect the left half using viewer-enabled firmware. For USB, select
           its second serial interface (the viewer port, not the Studio RPC
           port). This display does not type, change bindings, or need Studio to
           stay open. Closing hides it to the tray; keyboard input continues
           normally. After connecting, only the keyboard is shown over your other
           apps. Right-click the ZMK tray icon and choose Show controls to
           resize, view combos, disconnect, or exit. Space+Backspace toggles the
-          display; Tab+Return shows or hides combos while connected.
+          display; Tab+Return shows or hides combos; Esc+Delete shows or hides
+          macros while connected. Lists take focus and accept mouse scrolling.
+          Bluetooth requires paired firmware with the viewer GATT service.
         </p>
       )}
       {config && bounds && (
@@ -448,6 +559,7 @@ export function ViewerApp() {
               >
                 <title>
                   {key.hold ? `Tap: ${key.tap}; Hold: ${key.hold}` : key.tap}
+                  {key.shifted ? `; Shift (US): ${key.shifted}` : ""}
                 </title>
                 <rect
                   x={key.x + 0.035}
@@ -459,14 +571,25 @@ export function ViewerApp() {
                 {key.hold && (
                   <text
                     className="key-hold"
-                    x={key.x + key.width / 2}
+                    x={key.x + key.width * (key.shifted ? 0.38 : 0.5)}
                     y={key.y + key.height * 0.28}
                     fontSize={Math.min(
                       0.17,
-                      (key.width * 0.9) / Math.max(key.hold.length * 0.6, 1),
+                      (key.width * (key.shifted ? 0.6 : 0.9)) /
+                        Math.max(key.hold.length * 0.6, 1),
                     )}
                   >
                     {key.hold}
+                  </text>
+                )}
+                {key.shifted && (
+                  <text
+                    className="key-shift"
+                    x={key.x + key.width - 0.12}
+                    y={key.y + key.height * 0.23}
+                    fontSize={0.18}
+                  >
+                    {key.shifted}
                   </text>
                 )}
                 <text
@@ -496,7 +619,15 @@ export function ViewerApp() {
           className="viewer-combos"
           aria-label="Firmware combos"
         >
-          <h2>Chords / combos ({config.combos.length})</h2>
+          <div className="viewer-panel-heading">
+            <h2>Chords / combos ({config.combos.length})</h2>
+            <button
+              onClick={() => setPanel(undefined)}
+              aria-label="Close combo list"
+            >
+              X
+            </button>
+          </div>
           {!config.combos.length ? (
             <p>No combos are defined in this firmware.</p>
           ) : (
@@ -510,8 +641,9 @@ export function ViewerApp() {
                 </tr>
               </thead>
               <tbody>
-                {config.combos.map((combo) => {
-                  const sourceLayer = combo.layers[0] ?? config.defaultLayer;
+                {config.combos.map((combo, index) => {
+                  const sourceLayer =
+                    config.layers[combo.layers[0]]?.id ?? config.defaultLayer;
                   const chord = combo.positions
                     .map(
                       (position) =>
@@ -525,21 +657,26 @@ export function ViewerApp() {
                     )
                     .join(" + ");
                   return (
-                    <tr key={combo.name}>
+                    <tr
+                      key={combo.slot ?? index}
+                      className={combo.enabled ? "" : "viewer-disabled"}
+                    >
                       <td
                         title={`${combo.name}; positions ${combo.positions.join(", ")}`}
                       >
                         {chord}
                       </td>
-                      <td>{bindingLabel(config, combo.binding).tap}</td>
+                      <td>
+                        {bindingLabel(config, combo.binding).tap}
+                        {combo.enabled ? "" : " (disabled)"}
+                      </td>
                       <td>
                         {combo.layers.length
                           ? combo.layers
                               .map(
-                                (id) =>
-                                  config.layers.find(
-                                    (candidate) => candidate.id === id,
-                                  )?.name || `Layer ${id}`,
+                                (index) =>
+                                  config.layers[index]?.name ||
+                                  `Inactive layer index ${index}`,
                               )
                               .join(", ")
                           : "All"}
@@ -553,13 +690,72 @@ export function ViewerApp() {
           )}
         </section>
       )}
+      {config && macros && (
+        <section
+          ref={combosPanel}
+          className="viewer-combos"
+          aria-label="Firmware macros"
+        >
+          <div className="viewer-panel-heading">
+            <h2>Macros ({config.macros.length})</h2>
+            <button
+              onClick={() => setPanel(undefined)}
+              aria-label="Close macro list"
+            >
+              X
+            </button>
+          </div>
+          {!config.macros.length ? (
+            <p>
+              {config.capabilities?.runtimeMacros
+                ? "No runtime macros are defined."
+                : "This firmware does not export macro definitions. Flash runtime/viewer-enabled firmware to view them."}
+            </p>
+          ) : (
+            <table>
+              <thead>
+                <tr>
+                  <th>Name</th>
+                  <th>Steps</th>
+                  <th>Source</th>
+                </tr>
+              </thead>
+              <tbody>
+                {config.macros.map((macro) => (
+                  <tr
+                    key={
+                      macro.slot === undefined
+                        ? `behavior-${macro.behaviorId}`
+                        : `slot-${macro.slot}`
+                    }
+                  >
+                    <td>
+                      {macro.name}
+                      {macro.hasUnsavedChanges ? " (unsaved)" : ""}
+                    </td>
+                    <td>
+                      {macro.steps
+                        .map((step) => macroStepLabel(config, step))
+                        .join("; ") || "Empty"}
+                    </td>
+                    <td>
+                      {macro.source ??
+                        (macro.slot === undefined ? "Native" : "Runtime")}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </section>
+      )}
       {config && (
         <footer>
           Display only - green: held physical key; blue: released. Layers follow
           firmware.
           <span>
-            Space+Backspace: show/hide display. Tab+Return: show/hide combos.
-            Right-click the ZMK tray icon for controls or to exit.
+            Space+Backspace: show/hide display. Tab+Return: combos. Esc+Delete:
+            macros. Right-click the ZMK tray icon for controls or to exit.
           </span>
           <button
             disabled={busy}

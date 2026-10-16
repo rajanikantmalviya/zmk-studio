@@ -52,6 +52,7 @@ fn main() {
             keyboard_overlay_pressed,
             keyboard_overlay_set,
             viewer::viewer_connect,
+            viewer::viewer_ble_list_devices,
             viewer::viewer_disconnect,
             viewer_window::viewer_set_overlay,
             viewer_window::viewer_toggle_display,

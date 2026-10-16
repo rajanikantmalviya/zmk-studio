@@ -7,11 +7,7 @@ use futures::channel::mpsc::SendError;
 use serde::{Deserialize, Serialize};
 
 use tauri::ipc::InvokeBody;
-use tauri::{
-    command,
-    ipc::{Request},
-    State,
-};
+use tauri::{command, ipc::Request, State};
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct AvailableDevice {
@@ -28,22 +24,22 @@ pub struct ActiveConnection<'a> {
 pub async fn transport_send_data(
     req: Request<'_>,
     state: State<'_, ActiveConnection<'_>>,
-) -> Result<(), ()> {
+) -> Result<(), String> {
     if let InvokeBody::Raw(data) = req.body() {
         let mut lock = state.conn.lock().await;
 
-        let sink = lock.as_mut().unwrap();
-        sink.send(data.clone()).await;
+        let sink = lock.as_mut().ok_or("No active keyboard transport.")?;
+        sink.send(data.clone())
+            .await
+            .map_err(|error| error.to_string())?;
+        Ok(())
+    } else {
+        Err("Keyboard transport requires a binary payload.".into())
     }
-
-    Ok(())
 }
 
 #[command]
-pub async fn transport_close(
-    req: Request<'_>,
-    state: State<'_, ActiveConnection<'_>>,
-) -> Result<(), ()> {
+pub async fn transport_close(state: State<'_, ActiveConnection<'_>>) -> Result<(), ()> {
     *state.conn.lock().await = None;
 
     Ok(())

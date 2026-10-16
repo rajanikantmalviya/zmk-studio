@@ -22,10 +22,13 @@ const {
   bindingLabel,
   displayedKeys,
   keyValue,
+  shiftedKeyValue,
   viewerBounds,
   viewerOverlaySize,
   viewerShortcuts,
   viewerShortcutEdges,
+  toggleViewerPanel,
+  macroStepLabel,
 } = await import(
   `data:text/javascript;base64,${Buffer.from(chunk.code).toString("base64")}`
 );
@@ -141,10 +144,12 @@ test("tap values and HRM hold values are separate and compact", () => {
   const config = parseConfiguration(frames());
   assert.deepEqual(bindingLabel(config, [2, 0x700e1, 0x70004]), {
     tap: "A",
+    shifted: "A",
     hold: "Lshft",
   });
   assert.deepEqual(bindingLabel(config, [2, 0x700e4, 0x7000f]), {
     tap: "L",
+    shifted: "L",
     hold: "Rctrl",
   });
   assert.deepEqual(bindingLabel(config, [3, 9, 0x7002c]), {
@@ -155,6 +160,93 @@ test("tap values and HRM hold values are separate and compact", () => {
   assert.equal(keyValue(0x7002f), "[");
   assert.equal(keyValue(0x70030), "]");
   assert.equal(keyValue(0x70016), "S");
+});
+
+test("firmware-defined home-row layer tap keeps its tap, shift and layer labels", () => {
+  const input = frames();
+  input.splice(-1, 0, {
+    type: "behavior",
+    id: 8,
+    name: "Home Row Layer Tap",
+    kind: "hold-tap",
+    children: [
+      [4, 0, 0],
+      [1, 0, 0],
+    ],
+  });
+  input.find((frame) => frame.type === "layer" && frame.id === 0).bindings[0] =
+    [8, 9, 0x70004];
+  const config = parseConfiguration(input);
+  assert.deepEqual(bindingLabel(config, [8, 9, 0x70004]), {
+    tap: "A",
+    shifted: "A",
+    hold: "Nav",
+  });
+  const held = parseSnapshot(
+    state({ layers: [9, 0], pressed: [[0, 0]] }),
+    config,
+  );
+  const keys = displayedKeys(config, held);
+  assert.equal(keys[0].tap, "A");
+  assert.equal(keys[0].shifted, "A");
+  assert.equal(keys[0].hold, "Nav");
+  assert.equal(keys[0].pressed, true);
+});
+
+test("shift legends cover US letters, digits and punctuation, not non-text actions", () => {
+  for (let id = 4; id <= 29; id++)
+    assert.equal(
+      shiftedKeyValue(0x70000 | id),
+      String.fromCharCode(65 + id - 4),
+    );
+  for (let offset = 0; offset < 10; offset++)
+    assert.equal(shiftedKeyValue(0x7001e + offset), "!@#$%^&*()"[offset]);
+  for (const [id, label] of [
+    [0x2d, "_"],
+    [0x2e, "+"],
+    [0x2f, "{"],
+    [0x30, "}"],
+    [0x31, "|"],
+    [0x33, ":"],
+    [0x34, '"'],
+    [0x35, "~"],
+    [0x36, "<"],
+    [0x37, ">"],
+    [0x38, "?"],
+  ])
+    assert.equal(shiftedKeyValue(0x70000 | id), label);
+  assert.equal(shiftedKeyValue(0x0207001e), "!");
+  assert.equal(shiftedKeyValue(0x20070038), "?");
+  for (const usage of [
+    0x70028, 0x7002c, 0x70050, 0x700e1, 0xc00b5, 0x01070006, 0x0407001e,
+    0x08070004, 0x80070004, 0,
+  ])
+    assert.equal(shiftedKeyValue(usage), undefined);
+});
+
+test("shift legends follow tap bindings, active layers and held-key origins", () => {
+  const input = frames();
+  input.find((frame) => frame.type === "layer" && frame.id === 9).bindings[0] =
+    [1, 0x7001e, 0];
+  const config = parseConfiguration(input);
+  assert.equal(bindingLabel(config, [4, 9, 0]).shifted, undefined);
+  assert.equal(bindingLabel(config, [1, 0x01070006, 0]).shifted, undefined);
+  const base = displayedKeys(config, parseSnapshot(state(), config));
+  assert.equal(base[0].shifted, "A");
+  assert.equal(base[0].hold, "Lshft");
+  assert.equal(base[1].shifted, undefined);
+  const upper = displayedKeys(
+    config,
+    parseSnapshot(state({ layers: [9, 0] }), config),
+  );
+  assert.equal(upper[0].shifted, "!");
+  assert.equal(upper[2].shifted, "B");
+  const held = displayedKeys(
+    config,
+    parseSnapshot(state({ layers: [9, 0], pressed: [[0, 0]] }), config),
+  );
+  assert.equal(held[0].shifted, "A");
+  assert.equal(held[0].hold, "Lshft");
 });
 
 test("actual active layer changes preserve the binding of the held layer-tap", () => {
@@ -197,6 +289,20 @@ test("firmware combo and one-shot action definitions are retained", () => {
   assert.equal(bindingLabel(config, config.combos[0].binding).tap, "Once Nav");
   assert.equal(config.keys[1].x, 1);
   assert.equal(viewerBounds(config).length, 4);
+});
+
+test("combo scopes retain inactive layer indices without accepting stale active layers", () => {
+  const data = frames();
+  data.find((frame) => frame.type === "combo").layers = [0, 1, 2, 3, 4, 5];
+  const config = parseConfiguration(data);
+  assert.deepEqual(config.combos[0].layers, [0, 1, 2, 3, 4, 5]);
+  assert.throws(() => parseSnapshot(state({ layers: [5] }), config), /layer/);
+  const duplicate = frames();
+  duplicate.find((frame) => frame.type === "combo").layers = [0, 0];
+  assert.throws(() => parseConfiguration(duplicate), /combo/);
+  const outOfRange = frames();
+  outOfRange.find((frame) => frame.type === "combo").layers = [32];
+  assert.throws(() => parseConfiguration(outOfRange), /integer/);
 });
 
 test("invalid, incomplete, or incompatible firmware data is rejected explicitly", () => {
@@ -289,7 +395,11 @@ test("viewer chords use physical base-layer tap identities across layer-tap hold
   const config = shortcutConfiguration();
   const shortcut = (pressed, layers = [0]) =>
     viewerShortcuts(config, parseSnapshot(state({ pressed, layers }), config));
-  assert.deepEqual(shortcut([[1, 0]]), { display: false, combos: false });
+  assert.deepEqual(shortcut([[1, 0]]), {
+    display: false,
+    combos: false,
+    macros: false,
+  });
   assert.deepEqual(
     shortcut(
       [
@@ -301,6 +411,7 @@ test("viewer chords use physical base-layer tap identities across layer-tap hold
     {
       display: true,
       combos: false,
+      macros: false,
     },
   );
   assert.deepEqual(
@@ -314,6 +425,7 @@ test("viewer chords use physical base-layer tap identities across layer-tap hold
     {
       display: false,
       combos: true,
+      macros: false,
     },
   );
   assert.deepEqual(
@@ -326,25 +438,30 @@ test("viewer chords use physical base-layer tap identities across layer-tap hold
     {
       display: true,
       combos: true,
+      macros: false,
     },
   );
-  assert.deepEqual(shortcut([]), { display: false, combos: false });
+  assert.deepEqual(shortcut([]), {
+    display: false,
+    combos: false,
+    macros: false,
+  });
 });
 
 test("held chords toggle once and rearm only after a chord key is released", () => {
-  const idle = { display: false, combos: false };
-  const held = { display: true, combos: true };
+  const idle = { display: false, combos: false, macros: false };
+  const held = { display: true, combos: true, macros: false };
   assert.deepEqual(viewerShortcutEdges(idle, held), held);
   assert.deepEqual(viewerShortcutEdges(held, held), idle);
   assert.deepEqual(viewerShortcutEdges(held, idle), idle);
   assert.deepEqual(viewerShortcutEdges(idle, held), held);
   assert.deepEqual(
-    viewerShortcutEdges(held, { display: true, combos: false }),
+    viewerShortcutEdges(held, { display: true, combos: false, macros: false }),
     idle,
   );
   assert.deepEqual(
-    viewerShortcutEdges({ display: true, combos: false }, held),
-    { display: false, combos: true },
+    viewerShortcutEdges({ display: true, combos: false, macros: false }, held),
+    { display: false, combos: true, macros: false },
   );
 });
 
@@ -367,6 +484,114 @@ test("modified outputs and recursive tap bindings do not trigger viewer chords",
         config,
       ),
     ),
-    { display: false, combos: false },
+    { display: false, combos: false, macros: false },
   );
+});
+
+test("Esc+Delete toggles macros despite layer-tap holds and never repeats while held", () => {
+  const config = shortcutConfiguration();
+  config.layers[0].bindings[0] = [3, 9, 0x70029];
+  config.layers[0].bindings[1] = [3, 9, 0x7004c];
+  const held = viewerShortcuts(
+    config,
+    parseSnapshot(
+      state({
+        pressed: [
+          [0, 0],
+          [1, 9],
+        ],
+        layers: [9, 0],
+      }),
+      config,
+    ),
+  );
+  assert.deepEqual(held, { display: false, combos: false, macros: true });
+  assert.deepEqual(viewerShortcutEdges(held, held), {
+    display: false,
+    combos: false,
+    macros: false,
+  });
+});
+
+test("viewer lists toggle closed and switching lists leaves only one active", () => {
+  assert.equal(toggleViewerPanel(undefined, "combos"), "combos");
+  assert.equal(toggleViewerPanel("combos", "combos"), undefined);
+  assert.equal(toggleViewerPanel("combos", "macros"), "macros");
+  assert.equal(toggleViewerPanel("macros", "macros"), undefined);
+});
+
+test("runtime macro names, steps, capabilities and disabled combos are retained", () => {
+  const data = frames();
+  data.splice(
+    -1,
+    0,
+    {
+      type: "behavior",
+      id: 8,
+      name: "Runtime Macro",
+      kind: "runtime-macro",
+      children: [],
+    },
+    {
+      type: "capabilities",
+      runtimeCombos: true,
+      runtimeMacros: true,
+      bleStreaming: true,
+    },
+    {
+      type: "macro",
+      slot: 2,
+      name: "Save",
+      source: "runtime",
+      hasUnsavedChanges: true,
+      steps: [
+        { kind: "press", binding: [1, 0x700e0, 0] },
+        { kind: "tap", binding: [1, 0x70016, 0] },
+        { kind: "delay", delayMs: 10 },
+        { kind: "release", binding: [1, 0x700e0, 0] },
+      ],
+    },
+  );
+  const combo = data.find((frame) => frame.type === "combo");
+  combo.binding = [8, 2, 0];
+  combo.enabled = false;
+  const config = parseConfiguration(data);
+  assert.equal(bindingLabel(config, combo.binding).tap, "Save");
+  assert.equal(config.combos[0].enabled, false);
+  assert.equal(config.macros[0].hasUnsavedChanges, true);
+  assert.equal(config.capabilities.bleStreaming, true);
+  assert.deepEqual(
+    config.macros[0].steps.map((step) => macroStepLabel(config, step)),
+    ["press: Lctrl", "tap: S", "Wait 10 ms", "release: Lctrl"],
+  );
+});
+
+test("invalid macro steps, duplicate slots and unknown bindings fail explicitly", () => {
+  const macro = {
+    type: "macro",
+    slot: 0,
+    name: "Test",
+    steps: [{ kind: "tap", binding: [1, 0x70004, 0] }],
+  };
+  assert.throws(
+    () => parseConfiguration([...frames(), macro, macro]),
+    /Duplicate runtime macro/,
+  );
+  assert.throws(
+    () =>
+      parseConfiguration([
+        ...frames(),
+        { ...macro, steps: [{ kind: "unknown" }] },
+      ]),
+    /Unknown firmware macro step/,
+  );
+  assert.throws(
+    () =>
+      parseConfiguration([
+        ...frames(),
+        { ...macro, steps: [{ kind: "tap", binding: [999, 0, 0] }] },
+      ]),
+    /Unknown firmware behavior/,
+  );
+  assert.deepEqual(parseConfiguration(frames()).macros, []);
 });

@@ -1,3 +1,5 @@
+use bluest::{Adapter, Characteristic, DeviceId};
+use futures::StreamExt;
 use serde::Serialize;
 use serde_json::Value;
 use std::{
@@ -8,8 +10,190 @@ use std::{
     time::Duration,
 };
 use tauri::{AppHandle, Emitter, State};
-use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{
+    AsyncBufRead, AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWriteExt, BufReader, WriteHalf,
+};
 use tokio_serial::{SerialPort, SerialPortBuilderExt};
+use uuid::Uuid;
+
+const VIEWER_SERVICE: Uuid = Uuid::from_u128(0x00000010_0196_6107_c967_c5cfb1c2482a);
+const VIEWER_COMMAND: Uuid = Uuid::from_u128(0x00000011_0196_6107_c967_c5cfb1c2482a);
+const VIEWER_DATA: Uuid = Uuid::from_u128(0x00000012_0196_6107_c967_c5cfb1c2482a);
+
+enum ViewerWriter {
+    Serial(WriteHalf<tokio_serial::SerialStream>),
+    Bluetooth(Characteristic),
+}
+
+impl ViewerWriter {
+    async fn command(&mut self, command: &[u8]) -> Result<(), String> {
+        match self {
+            Self::Serial(writer) => writer
+                .write_all(command)
+                .await
+                .map_err(|error| format!("Could not write viewer USB command: {error}")),
+            Self::Bluetooth(characteristic) => {
+                tokio::time::timeout(Duration::from_secs(10), characteristic.write(command))
+                    .await
+                    .map_err(|_| "Bluetooth viewer command timed out.".to_string())?
+                    .map_err(|error| format!("Could not write viewer Bluetooth command: {error}"))
+            }
+        }
+    }
+}
+
+struct NotificationPump(tauri::async_runtime::JoinHandle<()>);
+
+impl Drop for NotificationPump {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+struct ViewerConnection {
+    reader: Box<dyn AsyncBufRead + Send + Unpin>,
+    writer: ViewerWriter,
+    pump: Option<NotificationPump>,
+    wireless: bool,
+}
+
+#[derive(Serialize)]
+pub struct ViewerDevice {
+    id: String,
+    label: String,
+}
+
+#[tauri::command]
+pub async fn viewer_ble_list_devices() -> Result<Vec<ViewerDevice>, String> {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        let adapter = Adapter::default()
+            .await
+            .ok_or("No Bluetooth adapter is available.")?;
+        tokio::time::timeout(Duration::from_secs(5), adapter.wait_available())
+            .await
+            .map_err(|_| "Bluetooth adapter did not become available.".to_string())?
+            .map_err(|error| format!("Could not access Bluetooth: {error}"))?;
+        // Connected HID keyboards may not advertise the optional viewer service.
+        // Bluest's Windows discover_devices path requires a nonempty service filter.
+        let devices = adapter
+            .connected_devices()
+            .await
+            .map_err(|error| format!("Could not discover Bluetooth keyboards: {error}"))?;
+        let mut available = Vec::new();
+        for device in devices {
+            if !device.is_connected().await {
+                continue;
+            }
+            let label = device
+                .name_async()
+                .await
+                .map_err(|error| format!("Could not read Bluetooth device name: {error}"))?;
+            let id = serde_json::to_string(&device.id()).map_err(|error| error.to_string())?;
+            if !available.iter().any(|entry: &ViewerDevice| entry.id == id) {
+                available.push(ViewerDevice { id, label });
+            }
+        }
+        Ok(available)
+    })
+    .await
+    .map_err(|_| "Bluetooth keyboard discovery timed out.".to_string())?
+}
+
+async fn open_bluetooth(
+    id: &str,
+    app: AppHandle,
+    connection_id: u64,
+) -> Result<ViewerConnection, String> {
+    let adapter = Adapter::default()
+        .await
+        .ok_or("No Bluetooth adapter is available.")?;
+    tokio::time::timeout(Duration::from_secs(5), adapter.wait_available())
+        .await
+        .map_err(|_| "Bluetooth adapter did not become available.".to_string())?
+        .map_err(|error| format!("Could not access Bluetooth: {error}"))?;
+    let id: DeviceId = serde_json::from_str(id)
+        .map_err(|error| format!("Invalid Bluetooth viewer device: {error}"))?;
+    let device = adapter
+        .open_device(&id)
+        .await
+        .map_err(|error| format!("Could not open Bluetooth keyboard: {error}"))?;
+    if !device.is_connected().await {
+        tokio::time::timeout(Duration::from_secs(10), adapter.connect_device(&device))
+            .await
+            .map_err(|_| "Bluetooth keyboard connection timed out.".to_string())?
+            .map_err(|error| format!("Could not connect Bluetooth keyboard: {error}"))?;
+    }
+    let service = tokio::time::timeout(Duration::from_secs(10), device.discover_services_with_uuid(VIEWER_SERVICE)).await
+        .map_err(|_| "Bluetooth viewer service discovery timed out.".to_string())?
+        .map_err(|error| format!("Could not discover Bluetooth viewer service: {error}"))?
+        .into_iter().next().ok_or("Keyboard has no Bluetooth viewer service. Flash viewer-enabled BLE firmware and refresh Windows' Bluetooth service cache.")?;
+    let command = service
+        .discover_characteristics_with_uuid(VIEWER_COMMAND)
+        .await
+        .map_err(|error| format!("Could not discover viewer command characteristic: {error}"))?
+        .into_iter()
+        .next()
+        .ok_or("Bluetooth viewer command characteristic is missing.")?;
+    let data = service
+        .discover_characteristics_with_uuid(VIEWER_DATA)
+        .await
+        .map_err(|error| format!("Could not discover viewer data characteristic: {error}"))?
+        .into_iter()
+        .next()
+        .ok_or("Bluetooth viewer data characteristic is missing.")?;
+    let (reader, mut incoming) = tokio::io::duplex(32768);
+    let (ready, subscribed) = tokio::sync::oneshot::channel();
+    let task = tauri::async_runtime::spawn(async move {
+        // Keep the adapter and subscription alive without disconnecting the shared HID link.
+        let _adapter = adapter;
+        let result: Result<(), String> = async {
+            let mut notifications = match data.notify().await {
+                Ok(stream) => stream,
+                Err(error) => {
+                    let message = format!("Could not subscribe to Bluetooth viewer: {error}");
+                    let _ = ready.send(Err(message.clone()));
+                    return Err(message);
+                }
+            };
+            if ready.send(Ok(())).is_err() {
+                return Ok(());
+            }
+            while let Some(bytes) = notifications.next().await {
+                let bytes = bytes
+                    .map_err(|error| format!("Bluetooth viewer notifications failed: {error}"))?;
+                incoming
+                    .write_all(&bytes)
+                    .await
+                    .map_err(|error| format!("Could not buffer Bluetooth viewer data: {error}"))?;
+            }
+            Err("Bluetooth viewer notification stream closed.".into())
+        }
+        .await;
+        if let Err(error) = result {
+            eprintln!("Keyboard viewer: {error}");
+            if let Err(emit_error) = app.emit(
+                "viewer-disconnected",
+                ViewerDisconnected {
+                    connection_id,
+                    error,
+                },
+            ) {
+                eprintln!("Could not report Bluetooth viewer error: {emit_error}");
+            }
+        }
+    });
+    let pump = NotificationPump(task);
+    tokio::time::timeout(Duration::from_secs(10), subscribed)
+        .await
+        .map_err(|_| "Bluetooth viewer subscription timed out.".to_string())?
+        .map_err(|error| format!("Bluetooth viewer subscription canceled: {error}"))??;
+    Ok(ViewerConnection {
+        reader: Box::new(BufReader::new(reader)),
+        writer: ViewerWriter::Bluetooth(command),
+        pump: Some(pump),
+        wireless: true,
+    })
+}
 
 #[derive(Default)]
 pub struct ViewerState {
@@ -28,7 +212,7 @@ impl ViewerState {
     }
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ViewerHandshake {
     connection_id: u64,
@@ -84,20 +268,27 @@ async fn open_viewer_port(id: &str) -> Result<tokio_serial::SerialStream, String
 }
 
 async fn read_frame<R: AsyncBufRead + Unpin>(reader: &mut R) -> Result<Value, String> {
+    read_frame_with_timeout(reader, Some(Duration::from_secs(10))).await
+}
+
+async fn read_frame_with_timeout<R: AsyncBufRead + Unpin>(
+    reader: &mut R,
+    timeout: Option<Duration>,
+) -> Result<Value, String> {
     let mut bytes = Vec::new();
-    let size = tokio::time::timeout(
-        Duration::from_secs(3),
-        (&mut *reader).take(8193).read_until(b'\n', &mut bytes),
-    )
-    .await
-    .map_err(|_| {
-        "Viewer response timed out. Select the viewer USB port and flash viewer-enabled firmware."
-            .to_string()
-    })?
-    .map_err(|e| format!("Could not read viewer port: {e}"))?;
+    let mut limited = (&mut *reader).take(8193);
+    let read = limited.read_until(b'\n', &mut bytes);
+    let size = if let Some(duration) = timeout {
+        tokio::time::timeout(duration, read).await.map_err(|_| {
+            "Viewer response timed out. Select the viewer interface and flash matching firmware.".to_string()
+        })?
+    } else {
+        read.await
+    }.map_err(|e| format!("Could not read viewer interface: {e}"))?;
     if size == 0 {
-        return Err("Keyboard viewer USB connection closed.".into());
+        return Err("Keyboard viewer connection closed.".into());
     }
+
     if size > 8192 || bytes.last() != Some(&b'\n') {
         return Err("Invalid or oversized viewer response.".into());
     }
@@ -112,6 +303,67 @@ async fn read_frame<R: AsyncBufRead + Unpin>(reader: &mut R) -> Result<Value, St
     Ok(value)
 }
 
+async fn read_stream_frame<R, F>(
+    reader: &mut R,
+    heartbeat: F,
+    idle_timeout: Duration,
+) -> Result<Value, String>
+where
+    R: AsyncBufRead + Unpin,
+    F: std::future::Future<Output = Result<(), String>>,
+{
+    // Keep a partially received frame alive while checking a quiet BLE session.
+    let read = read_frame_with_timeout(reader, None);
+    tokio::pin!(read);
+    let idle = tokio::time::sleep(idle_timeout);
+    tokio::pin!(idle);
+    match futures::future::select(&mut read, &mut idle).await {
+        futures::future::Either::Left((result, _)) => result,
+        futures::future::Either::Right(_) => {
+            heartbeat.await?;
+            tokio::time::timeout(Duration::from_secs(3), &mut read)
+                .await
+                .map_err(|_| "Bluetooth viewer stopped responding. Reconnect the keyboard.".to_string())?
+        }
+    }
+}
+
+async fn read_configuration<R: AsyncBufRead + Unpin>(reader: &mut R) -> Result<Vec<Value>, String> {
+    tokio::time::timeout(Duration::from_secs(30), read_configuration_frames(reader))
+        .await
+        .map_err(|_| "Viewer configuration transfer timed out.".to_string())?
+}
+
+async fn read_configuration_frames<R: AsyncBufRead + Unpin>(
+    reader: &mut R,
+) -> Result<Vec<Value>, String> {
+    let mut frames = Vec::new();
+    let mut total = 0;
+    loop {
+        let frame = read_frame(reader).await?;
+        total += frame.to_string().len();
+        if frames.len() >= 512 || total > 131072 {
+            return Err("Viewer configuration exceeds supported size.".into());
+        }
+        let ready = frame["type"] == "ready";
+        // In-flight BLE state notifications may precede a newly requested configuration.
+        if frame["type"] != "state" {
+            frames.push(frame);
+        }
+        if ready {
+            return Ok(frames);
+        }
+    }
+}
+
+fn configuration_revision(frames: &[Value], state: &Value) -> Value {
+    frames
+        .iter()
+        .find(|frame| frame["type"] == "capabilities" && !frame["configRevision"].is_null())
+        .map(|frame| frame["configRevision"].clone())
+        .unwrap_or_else(|| state["configRevision"].clone())
+}
+
 #[tauri::command]
 pub fn viewer_disconnect(state: State<'_, ViewerState>) -> Result<(), String> {
     state.stop()
@@ -120,46 +372,106 @@ pub fn viewer_disconnect(state: State<'_, ViewerState>) -> Result<(), String> {
 #[tauri::command]
 pub async fn viewer_connect(
     id: String,
+    transport: Option<String>,
     app: AppHandle,
     state: State<'_, ViewerState>,
 ) -> Result<ViewerHandshake, String> {
     state.stop()?;
     let connection_id = state.generation.fetch_add(1, Ordering::SeqCst) + 1;
-    let port = open_viewer_port(&id).await?;
-    let (reader, mut writer) = tokio::io::split(port);
-    let mut reader = BufReader::new(reader);
-    writer.write_all(b"C").await.map_err(|e| e.to_string())?;
-    let mut frames = Vec::new();
-    let mut total = 0;
-    loop {
-        let frame = read_frame(&mut reader).await?;
-        if frame["type"] == "ready" {
-            frames.push(frame);
-            break;
+    let connection = match transport.as_deref().unwrap_or("usb") {
+        "usb" => {
+            let port = open_viewer_port(&id).await?;
+            let (reader, writer) = tokio::io::split(port);
+            ViewerConnection {
+                reader: Box::new(BufReader::new(reader)),
+                writer: ViewerWriter::Serial(writer),
+                pump: None,
+                wireless: false,
+            }
         }
-        total += frame.to_string().len();
-        if frames.len() >= 512 || total > 131072 {
-            return Err("Viewer configuration exceeds supported size.".into());
-        }
-        frames.push(frame);
-    }
-    writer.write_all(b"S").await.map_err(|e| e.to_string())?;
+        "ble" => open_bluetooth(&id, app.clone(), connection_id).await?,
+        _ => return Err("Unknown viewer transport.".into()),
+    };
+    let ViewerConnection {
+        mut reader,
+        mut writer,
+        pump,
+        wireless,
+    } = connection;
+    writer.command(b"C").await?;
+    let frames = read_configuration(&mut reader).await?;
+    writer.command(b"S").await?;
     let initial_state = read_frame(&mut reader).await?;
     if initial_state["type"] != "state" {
         return Err("Unexpected initial keyboard viewer state.".into());
+    }
+    let revision = configuration_revision(&frames, &initial_state);
+    if wireless {
+        let streaming = frames
+            .iter()
+            .any(|frame| frame["type"] == "capabilities" && frame["bleStreaming"] == true);
+        if !streaming {
+            return Err(
+                "Bluetooth viewer firmware does not support event-driven streaming.".into(),
+            );
+        }
+        writer.command(b"E").await?;
     }
     let mut active_task = state.task.lock().map_err(|e| e.to_string())?;
     if state.generation.load(Ordering::SeqCst) != connection_id {
         return Err("Viewer connection was canceled.".into());
     }
+    let initial_snapshot = initial_state.clone();
     let task = tauri::async_runtime::spawn(async move {
+        let _pump = pump;
         let mut previous = Value::Null;
+        let mut revision = revision;
+        let mut pending_snapshot = Some(initial_snapshot);
         let result: Result<(), String> = async {
             loop {
-                writer.write_all(b"S").await.map_err(|e| e.to_string())?;
-                let snapshot = read_frame(&mut reader).await?;
+                let mut snapshot = if let Some(snapshot) = pending_snapshot.take() {
+                    snapshot
+                } else {
+                    if !wireless {
+                        writer.command(b"S").await?;
+                    }
+                    if wireless {
+                        read_stream_frame(
+                            &mut reader,
+                            async { writer.command(b"E").await },
+                            Duration::from_secs(5),
+                        )
+                        .await?
+                    } else {
+                        read_frame_with_timeout(&mut reader, Some(Duration::from_secs(3))).await?
+                    }
+                };
                 if snapshot["type"] != "state" {
                     return Err("Unexpected keyboard viewer state response.".into());
+                }
+                if !snapshot["configRevision"].is_null() && snapshot["configRevision"] != revision {
+                    writer.command(b"C").await?;
+                    let frames = read_configuration(&mut reader).await?;
+                    writer.command(b"S").await?;
+                    snapshot = read_frame(&mut reader).await?;
+                    if snapshot["type"] != "state" {
+                        return Err("Unexpected refreshed keyboard viewer state.".into());
+                    }
+                    revision = configuration_revision(&frames, &snapshot);
+                    if !snapshot["configRevision"].is_null()
+                        && snapshot["configRevision"] != revision
+                    {
+                        pending_snapshot = Some(snapshot.clone());
+                    }
+                    app.emit(
+                        "viewer-configuration",
+                        ViewerHandshake {
+                            connection_id,
+                            frames,
+                            initial_state: snapshot.clone(),
+                        },
+                    )
+                    .map_err(|error| format!("Could not refresh viewer configuration: {error}"))?;
                 }
                 if snapshot != previous {
                     app.emit(
@@ -172,7 +484,9 @@ pub async fn viewer_connect(
                     .map_err(|e| format!("Could not update viewer: {e}"))?;
                     previous = snapshot;
                 }
-                tokio::time::sleep(Duration::from_millis(25)).await;
+                if !wireless {
+                    tokio::time::sleep(Duration::from_millis(25)).await;
+                }
             }
         }
         .await;
@@ -200,6 +514,138 @@ pub async fn viewer_connect(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn revision_tracks_configuration_not_a_newer_state() {
+        let frames = vec![
+            serde_json::json!({"type":"capabilities","configRevision":4}),
+            serde_json::json!({"type":"ready"}),
+        ];
+        let state = serde_json::json!({"type":"state","configRevision":5});
+        assert_eq!(configuration_revision(&frames, &state), 4);
+        assert_ne!(
+            configuration_revision(&frames, &state),
+            state["configRevision"]
+        );
+        let refreshed = vec![serde_json::json!({"type":"capabilities","configRevision":5})];
+        assert_eq!(
+            configuration_revision(&refreshed, &state),
+            state["configRevision"]
+        );
+    }
+
+    #[test]
+    fn legacy_revision_falls_back_to_state_and_keeps_zero() {
+        let state = serde_json::json!({"type":"state","configRevision":5});
+        assert_eq!(configuration_revision(&[], &state), 5);
+        let frames = vec![serde_json::json!({"type":"capabilities","configRevision":0})];
+        assert_eq!(configuration_revision(&frames, &state), 0);
+        assert!(configuration_revision(&[], &serde_json::json!({"type":"state"})).is_null());
+    }
+
+    #[test]
+    fn bluetooth_fragments_preserve_frames_and_skip_inflight_states_during_reload() {
+        tauri::async_runtime::block_on(async {
+            let (reader, mut writer) = tokio::io::duplex(64);
+            let task = tauri::async_runtime::spawn(async move {
+                for bytes in [
+                    &b"{\"type\":\"state\",\"sequence\":1}\n{\"ty"[..],
+                    &b"pe\":\"hello\",\"version\":1}\n{\"type\":\"ready\"}\n"[..],
+                ] {
+                    writer.write_all(bytes).await.unwrap();
+                }
+            });
+            let frames = read_configuration(&mut BufReader::new(reader))
+                .await
+                .unwrap();
+            assert_eq!(frames.len(), 2);
+            assert_eq!(frames[0]["type"], "hello");
+            assert_eq!(frames[1]["type"], "ready");
+            task.await.unwrap();
+        });
+    }
+
+    #[test]
+    fn quiet_bluetooth_stream_does_not_trigger_a_polling_timeout() {
+        tauri::async_runtime::block_on(async {
+            let (reader, mut writer) = tokio::io::duplex(128);
+            let task = tauri::async_runtime::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(30)).await;
+                writer
+                    .write_all(b"{\"type\":\"state\",\"sequence\":2}\n")
+                    .await
+                    .unwrap();
+            });
+            let frame = read_frame_with_timeout(&mut BufReader::new(reader), None)
+                .await
+                .unwrap();
+            assert_eq!(frame["sequence"], 2);
+            task.await.unwrap();
+        });
+    }
+
+    #[test]
+    fn active_stream_does_not_send_a_heartbeat() {
+        tauri::async_runtime::block_on(async {
+            let mut reader = &b"{\"type\":\"state\",\"sequence\":3}\n"[..];
+            let frame = read_stream_frame(
+                &mut reader,
+                async { panic!("Active streams must remain event-driven") },
+                Duration::from_millis(10),
+            )
+            .await
+            .unwrap();
+            assert_eq!(frame["sequence"], 3);
+        });
+    }
+
+    #[test]
+    fn quiet_stream_heartbeat_recovers_without_losing_partial_frames() {
+        tauri::async_runtime::block_on(async {
+            let (reader, mut writer) = tokio::io::duplex(128);
+            writer.write_all(b"{\"type\":\"state\",\"seq").await.unwrap();
+            let frame = read_stream_frame(
+                &mut BufReader::new(reader),
+                async {
+                    writer.write_all(b"uence\":4}\n").await.unwrap();
+                    Ok(())
+                },
+                Duration::from_millis(10),
+            )
+            .await
+            .unwrap();
+            assert_eq!(frame["sequence"], 4);
+        });
+    }
+
+    #[test]
+    fn quiet_stream_reports_failed_heartbeat() {
+        tauri::async_runtime::block_on(async {
+            let (reader, _writer) = tokio::io::duplex(128);
+            let error = read_stream_frame(
+                &mut BufReader::new(reader),
+                async { Err("Keyboard disconnected".to_string()) },
+                Duration::from_millis(10),
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(error, "Keyboard disconnected");
+        });
+    }
+
+    #[test]
+    fn stalled_frame_reads_are_explicit_errors() {
+        tauri::async_runtime::block_on(async {
+            let (reader, _writer) = tokio::io::duplex(128);
+            assert!(read_frame_with_timeout(
+                &mut BufReader::new(reader),
+                Some(Duration::from_millis(10)),
+            )
+            .await
+            .unwrap_err()
+            .contains("timed out"));
+        });
+    }
 
     #[test]
     fn startup_drains_stale_bytes_without_consuming_new_responses() {

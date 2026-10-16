@@ -10,7 +10,7 @@ import { LockState } from "@zmkfirmware/zmk-studio-ts-client/core";
 export function useConnectedDeviceData<T>(
   req: Omit<Request, "requestId">,
   response_mapper: (resp: RequestResponse) => T | undefined,
-  requireUnlock?: boolean
+  requireUnlock?: boolean,
 ): [T | undefined, React.Dispatch<SetStateAction<T | undefined>>] {
   let connection = useContext(ConnectionContext);
   let lockState = useContext(LockStateContext);
@@ -41,7 +41,12 @@ export function useConnectedDeviceData<T>(
       }
 
       let ignore = false;
-      startRequest();
+      startRequest().catch((error) => {
+        if (!ignore)
+          window.alert(
+            `Could not load keyboard data: ${error instanceof Error ? error.message : String(error)}`,
+          );
+      });
 
       return () => {
         ignore = true;
@@ -49,7 +54,7 @@ export function useConnectedDeviceData<T>(
     },
     requireUnlock
       ? [connection, requireUnlock, lockState]
-      : [connection, requireUnlock]
+      : [connection, requireUnlock],
   );
 
   return [data, setData];

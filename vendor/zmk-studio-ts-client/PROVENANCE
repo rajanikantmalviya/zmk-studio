@@ -1,0 +1,19 @@
+Source: https://github.com/cormoran/zmk-studio-ts-client
+Branch: custom-studio-protocol
+Commit: 3a759c4bd259d8d8f7c3783a9fa90a3048adfc47
+License: MIT (LICENSE retained)
+
+src retains upstream source, including unmodified generated custom/studio
+protobuf codecs. One local patch to src/index.ts releases stream locks in
+finally blocks and rejects enum-valued generic errors (zero) instead of
+mistaking them for success. lib was compiled locally using this application's TypeScript compiler
+(target ES2022, module ES2020, declaration, esModuleInterop, skipLibCheck).
+The packaging manifest is reduced to remove install-time source generation,
+git submodule/network operations and upstream development dependencies.
+Regeneration of the envelope requires the upstream pinned messages submodule;
+normal application installation uses the checked-in compiled codecs.
+
+A second local patch accepts a zero-ID RPC_NOT_FOUND response solely to the
+read-only listCustomSubsystems request. Older firmware omits the request ID
+when rejecting the unknown custom subsystem; all other mismatched IDs remain
+errors. Verified against the existing keyboard before updating firmware.

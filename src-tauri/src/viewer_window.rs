@@ -16,6 +16,7 @@ struct ControlsWindow {
 #[derive(Default)]
 pub struct ViewerWindowState {
     controls: Mutex<Option<ControlsWindow>>,
+    foreground: Mutex<Option<isize>>,
 }
 
 fn overlay_dimensions(
@@ -59,6 +60,7 @@ fn overlay_dimensions(
 }
 
 fn restore_controls(window: &WebviewWindow, state: &ViewerWindowState) -> Result<(), String> {
+    *state.foreground.lock().map_err(|e| e.to_string())? = None;
     window
         .set_ignore_cursor_events(false)
         .map_err(|e| e.to_string())?;
@@ -90,12 +92,14 @@ fn enable_overlay(
     height: f64,
     pixel_ratio: f64,
     combos_height: f64,
+    interactive: bool,
 ) -> Result<(), String> {
     use windows_sys::Win32::Graphics::Gdi::{
         GetMonitorInfoW, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTONEAREST,
     };
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        GetWindowLongPtrW, GWL_EXSTYLE, WS_EX_TOPMOST,
+        GetForegroundWindow, GetWindowLongPtrW, IsWindow, SetForegroundWindow, GWL_EXSTYLE,
+        WS_EX_TOPMOST,
     };
     let hwnd = window.hwnd().map_err(|e| e.to_string())?.0 as _;
     let mut monitor: MONITORINFO = unsafe { std::mem::zeroed() };
@@ -142,10 +146,31 @@ fn enable_overlay(
         ))
         .map_err(|e| e.to_string())?;
     window
-        .set_ignore_cursor_events(true)
+        .set_ignore_cursor_events(!interactive)
         .map_err(|e| e.to_string())?;
     // Tauri's window setters can rewrite extended styles, so apply this last.
-    crate::window_style::set_overlay_style(window, true)?;
+    crate::window_style::set_overlay_style(window, !interactive)?;
+    let mut foreground = state.foreground.lock().map_err(|e| e.to_string())?;
+    if interactive {
+        if foreground.is_none() {
+            let previous = unsafe { GetForegroundWindow() };
+            *foreground = Some(previous as isize);
+            window.show().map_err(|e| e.to_string())?;
+            window.set_focus().map_err(|e| e.to_string())?;
+        } else if !window.is_visible().map_err(|e| e.to_string())? {
+            window.show().map_err(|e| e.to_string())?;
+            window.set_focus().map_err(|e| e.to_string())?;
+        }
+    } else if let Some(previous) = foreground.take() {
+        let previous = previous as _;
+        if unsafe { GetForegroundWindow() } == hwnd
+            && previous != hwnd
+            && unsafe { IsWindow(previous) } != 0
+            && unsafe { SetForegroundWindow(previous) } == 0
+        {
+            eprintln!("Keyboard viewer: Windows declined to restore the previous app's focus.");
+        }
+    }
     Ok(())
 }
 
@@ -158,6 +183,7 @@ pub fn viewer_set_overlay(
     height: f64,
     pixel_ratio: f64,
     combos_height: f64,
+    interactive: bool,
 ) -> Result<(), String> {
     if window.app_handle().config().identifier != "dev.zmk.keyboard-viewer" {
         return Err("Typing overlay is only available in the standalone viewer.".into());
@@ -168,7 +194,15 @@ pub fn viewer_set_overlay(
     #[cfg(not(windows))]
     return Err("The typing overlay is currently supported on Windows only.".into());
     #[cfg(windows)]
-    if let Err(error) = enable_overlay(&window, &state, width, height, pixel_ratio, combos_height) {
+    if let Err(error) = enable_overlay(
+        &window,
+        &state,
+        width,
+        height,
+        pixel_ratio,
+        combos_height,
+        interactive,
+    ) {
         return match restore_controls(&window, &state) {
             Ok(()) => Err(error),
             Err(cleanup) => Err(format!(
@@ -186,7 +220,12 @@ pub fn viewer_toggle_display(window: WebviewWindow) -> Result<(), String> {
         return Err("Display shortcuts are only available in the standalone viewer.".into());
     }
     if window.is_visible().map_err(|e| e.to_string())? {
-        return window.hide().map_err(|e| e.to_string());
+        window.hide().map_err(|e| e.to_string())?;
+        #[cfg(windows)]
+        window
+            .emit("viewer-hidden", ())
+            .map_err(|e| e.to_string())?;
+        return Ok(());
     }
     #[cfg(windows)]
     {
@@ -208,6 +247,8 @@ pub fn window_event(window: &tauri::Window, event: &tauri::WindowEvent) {
         if let tauri::WindowEvent::CloseRequested { api, .. } = event {
             api.prevent_close();
             if let Err(error) = window.hide() {
+                report_error(window.app_handle(), error.to_string());
+            } else if let Err(error) = window.emit("viewer-hidden", ()) {
                 report_error(window.app_handle(), error.to_string());
             }
         }

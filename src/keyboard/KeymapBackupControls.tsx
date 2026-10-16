@@ -10,15 +10,19 @@ import { LockStateContext } from "../rpc/LockStateContext";
 import { call_rpc } from "../rpc/logging";
 import { UndoRedoContext } from "../undoRedo";
 import { useModalRef } from "../misc/useModalRef";
+import { RuntimeContext } from "../runtime/context";
 import {
-  applyKeymapBackup,
+  applyStudioBackup,
+  createStudioBackup,
+  planStudioRestore,
+  studioBackupJSON,
+} from "../runtime/backup";
+import {
   BehaviorMap,
-  createKeymapBackup,
   errorMessage,
   KeymapBackup,
   KeymapRpc,
   parseKeymapBackup,
-  validateKeymapBackup,
 } from "./keymapBackup";
 
 interface KeymapBackupControlsProps {
@@ -39,6 +43,7 @@ export function KeymapBackupControls({
   const connection = useContext(ConnectionContext);
   const lockState = useContext(LockStateContext);
   const undoRedo = useContext(UndoRedoContext);
+  const runtime = useContext(RuntimeContext);
   const [open, setOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const [backup, setBackup] = useState<KeymapBackup>();
@@ -53,7 +58,9 @@ export function KeymapBackupControls({
     !!connection.conn &&
     lockState === LockState.ZMK_STUDIO_CORE_LOCK_STATE_UNLOCKED &&
     Object.keys(behaviors).length > 0 &&
-    !busy;
+    !busy &&
+    !runtime.busy &&
+    !runtime.error;
 
   useEffect(() => {
     fileRead.current++;
@@ -109,14 +116,21 @@ export function KeymapBackupControls({
     setStatus(undefined);
     setBusy(true);
     try {
-      const data = createKeymapBackup(
-        await readKeymap(),
-        layout,
-        behaviors,
-        deviceName,
+      if (!runtime.client)
+        throw new Error(
+          "Wait for runtime capability discovery before exporting.",
+        );
+      const data = await runtime.run(async () =>
+        createStudioBackup(
+          await readKeymap(),
+          layout,
+          behaviors,
+          deviceName,
+          await runtime.client!.snapshot(),
+        ),
       );
       const url = URL.createObjectURL(
-        new Blob([JSON.stringify(data, null, 2) + "\n"], {
+        new Blob([JSON.stringify(studioBackupJSON(data), null, 2) + "\n"], {
           type: "application/json",
         }),
       );
@@ -134,7 +148,9 @@ export function KeymapBackupControls({
         // Allow the webview/browser to start consuming the download.
         setTimeout(() => URL.revokeObjectURL(url), 1000);
       }
-      setStatus("Keymap exported, including pending edits.");
+      setStatus(
+        "Full backup exported: keymap, runtime combos/macros, settings and named references, including pending edits.",
+      );
     } catch (cause) {
       console.error("Keymap export failed", cause);
       setError(errorMessage(cause));
@@ -150,7 +166,13 @@ export function KeymapBackupControls({
     setError(undefined);
     try {
       const parsed = parseKeymapBackup(await file.text());
-      validateKeymapBackup(parsed, keymap, layout, behaviors);
+      planStudioRestore(
+        parsed,
+        keymap,
+        layout,
+        behaviors,
+        runtime.client ? await runtime.client.snapshot() : {},
+      );
       if (mounted.current && sequence === fileRead.current) {
         setBackup(parsed);
       }
@@ -170,22 +192,27 @@ export function KeymapBackupControls({
       await undoRedo(async () => {
         setBusy(true);
         try {
-          const result = await applyKeymapBackup(
-            backup,
-            await readKeymap(),
-            layout,
-            behaviors,
-            rpc,
+          const result = await runtime.run(async () =>
+            applyStudioBackup(
+              backup,
+              await readKeymap(),
+              layout,
+              behaviors,
+              rpc,
+              runtime.client,
+            ),
           );
           onKeymapChanged(result.keymap);
+          await runtime.reload();
           setStatus(
             "Keymap imported. Review it, then Save to keep it on the keyboard.",
           );
           return async () => {
             setBusy(true);
             try {
-              await result.undo();
+              await runtime.run(result.undo);
               await refresh();
+              await runtime.reload();
               setStatus("Keymap import undone.");
             } catch (cause) {
               console.error("Could not undo keymap import", cause);
@@ -234,7 +261,7 @@ export function KeymapBackupControls({
         isDisabled={!ready}
         onPress={exportKeymap}
       >
-        Export Keymap JSON
+        Export Full Backup JSON
       </Button>
       <Button
         className="rounded bg-base-100 hover:bg-base-300 px-3 py-2 disabled:opacity-50"
@@ -246,7 +273,7 @@ export function KeymapBackupControls({
           setOpen(true);
         }}
       >
-        Import Keymap JSON
+        Import Backup JSON
       </Button>
       {!open && error && (
         <p role="alert" className="text-error text-sm">
@@ -277,9 +304,14 @@ export function KeymapBackupControls({
           Import / Export Keymap
         </h2>
         <p>
-          Import replaces all layer names and key bindings, adding or removing
-          layers as needed. Current pending edits will be replaced. Nothing is
-          saved permanently until you click Save. Export first to keep a backup.
+          Version 2 restores layer names/bindings, runtime combos, named macros
+          and global runtime timing. Version 1 remains keymap-only (raw runtime
+          macro references are rejected). Export first. Capacity, behaviors,
+          references and physical geometry are checked before any write.
+          Target-only macros must be explicitly removed first. Writes are not
+          transactional; interrupted restore uses a best-effort rollback
+          journal. Empty combo slots may become disabled tombstones (source
+          status can differ). No Save is requested during restore.
         </p>
         <label className="block my-3">
           Keymap JSON file
@@ -323,7 +355,7 @@ export function KeymapBackupControls({
             isDisabled={!backup || !ready || !undoRedo}
             onPress={applyImport}
           >
-            Replace Keymap
+            Restore Backup in Memory
           </Button>
         </div>
       </dialog>

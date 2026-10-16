@@ -36,6 +36,21 @@ body {
   padding: 8px;
   background: #111827ee;
 }
+.viewer-panel-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.viewer-panel-heading h2 {
+  margin: 0 0 8px;
+}
+.viewer-disabled {
+  opacity: 0.6;
+}
+.viewer-combos td {
+  overflow-wrap: anywhere;
+}
 .viewer-drag {
   border: 0;
   background: transparent;
@@ -120,6 +135,10 @@ select {
 .viewer-keyboard .key-hold {
   fill: #94a3b8;
 }
+.viewer-keyboard .key-shift {
+  text-anchor: end;
+  fill: #a5b4fc;
+}
 .viewer-keyboard .key-down rect {
   fill: #166534;
   stroke: #4ade80;
@@ -130,6 +149,9 @@ select {
 }
 .viewer-keyboard .key-down .key-hold {
   fill: #bbf7d0;
+}
+.viewer-keyboard .key-down .key-shift {
+  fill: #e0e7ff;
 }
 .viewer-error {
   color: #fecaca;

@@ -1,0 +1,13 @@
+combo.proto:
+  https://github.com/cormoran/zmk-feature-runtime-combo
+  d9490e7b5d41c516221d131241009e81740efcee
+macro.proto:
+  https://github.com/cormoran/zmk-feature-runtime-macro
+  38530962eb7061b60efcb98e84585cfb1f0cb6de
+License: MIT, see LICENSE.
+
+Schemas copied unchanged. Generated TypeScript is produced by ts-proto 2.11.7
+and buf 1.62.1 using src/runtime/buf.gen.yaml:
+  From src/runtime, with node_modules/.bin on PATH: buf generate
+Generated codecs depend on @bufbuild/protobuf 2.11.0.
+Firmware may patch storage semantics without changing these wire schemas.

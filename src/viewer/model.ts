@@ -13,6 +13,8 @@ export type BehaviorKind =
   | "transparent"
   | "none"
   | "tap-dance"
+  | "runtime-macro"
+  | "macro"
   | "mouse";
 export interface ViewerBehavior {
   id: number;
@@ -38,9 +40,30 @@ export interface ViewerLayer {
 export interface ViewerCombo {
   name: string;
   positions: number[];
+  // Combo masks use ordered layer indices, unlike snapshot/keymap layer IDs.
   layers: number[];
   binding: Binding;
   timeoutMs: number;
+  slot?: number;
+  enabled: boolean;
+  source?: string;
+}
+export type ViewerMacroStep =
+  | { kind: "tap" | "press" | "release"; binding: Binding }
+  | { kind: "delay"; delayMs: number }
+  | { kind: "pause-for-release" };
+export interface ViewerMacro {
+  slot?: number;
+  behaviorId?: number;
+  name: string;
+  steps: ViewerMacroStep[];
+  source?: string;
+  hasUnsavedChanges: boolean;
+}
+export interface ViewerCapabilities {
+  runtimeCombos: boolean;
+  runtimeMacros: boolean;
+  bleStreaming: boolean;
 }
 export interface ViewerConfiguration {
   deviceName: string;
@@ -50,6 +73,8 @@ export interface ViewerConfiguration {
   behaviors: Record<number, ViewerBehavior>;
   layers: ViewerLayer[];
   combos: ViewerCombo[];
+  macros: ViewerMacro[];
+  capabilities?: ViewerCapabilities;
 }
 export interface ViewerSnapshot {
   sequence: number;
@@ -60,6 +85,7 @@ export interface ViewerSnapshot {
 export interface KeyLabel {
   tap: string;
   hold?: string;
+  shifted?: string;
 }
 
 const kinds: BehaviorKind[] = [
@@ -73,6 +99,8 @@ const kinds: BehaviorKind[] = [
   "transparent",
   "none",
   "tap-dance",
+  "runtime-macro",
+  "macro",
   "mouse",
 ];
 
@@ -99,6 +127,10 @@ function text(value: unknown): string {
   }
   return value;
 }
+function boolean(value: unknown): boolean {
+  if (typeof value !== "boolean") throw new Error("Invalid viewer boolean.");
+  return value;
+}
 function array(value: unknown, maximum: number): unknown[] {
   if (!Array.isArray(value) || value.length > maximum) {
     throw new Error("Invalid viewer array.");
@@ -121,6 +153,8 @@ export function parseConfiguration(frames: unknown[]): ViewerConfiguration {
   const layers: ViewerLayer[] = [];
   const behaviors: Record<number, ViewerBehavior> = {};
   const combos: ViewerCombo[] = [];
+  const macros: ViewerMacro[] = [];
+  let capabilities: ViewerCapabilities | undefined;
   for (const raw of array(frames, 512)) {
     const frame = object(raw);
     switch (frame.type) {
@@ -183,7 +217,48 @@ export function parseConfiguration(frames: unknown[]): ViewerConfiguration {
           layers: numbers(frame.layers, 32, 31),
           binding: binding(frame.binding),
           timeoutMs: integer(frame.timeoutMs),
+          slot: frame.slot === undefined ? undefined : integer(frame.slot, 63),
+          enabled: frame.enabled === undefined ? true : boolean(frame.enabled),
+          source: frame.source === undefined ? undefined : text(frame.source),
         });
+        break;
+      case "macro":
+        macros.push({
+          slot: frame.slot === undefined ? undefined : integer(frame.slot, 63),
+          behaviorId:
+            frame.behaviorId === undefined
+              ? undefined
+              : integer(frame.behaviorId, 65535),
+          name: text(frame.name),
+          source: frame.source === undefined ? undefined : text(frame.source),
+          hasUnsavedChanges:
+            frame.hasUnsavedChanges === undefined
+              ? false
+              : boolean(frame.hasUnsavedChanges),
+          steps: array(frame.steps, 256).map((value): ViewerMacroStep => {
+            const step = object(value);
+            if (step.kind === "delay")
+              return { kind: "delay", delayMs: integer(step.delayMs) };
+            if (step.kind === "pause-for-release")
+              return { kind: "pause-for-release" };
+            if (
+              step.kind === "tap" ||
+              step.kind === "press" ||
+              step.kind === "release"
+            ) {
+              return { kind: step.kind, binding: binding(step.binding) };
+            }
+            throw new Error("Unknown firmware macro step.");
+          }),
+        });
+        break;
+      case "capabilities":
+        if (capabilities) throw new Error("Duplicate viewer capabilities.");
+        capabilities = {
+          runtimeCombos: boolean(frame.runtimeCombos),
+          runtimeMacros: boolean(frame.runtimeMacros),
+          bleStreaming: boolean(frame.bleStreaming),
+        };
         break;
       case "ready":
         ready = true;
@@ -228,9 +303,25 @@ export function parseConfiguration(frames: unknown[]): ViewerConfiguration {
       !combo.positions.length ||
       new Set(combo.positions).size !== combo.positions.length ||
       combo.positions.some((position) => position >= keys.length) ||
-      combo.layers.some((id) => !layers.some((layer) => layer.id === id))
+      new Set(combo.layers).size !== combo.layers.length
     ) {
       throw new Error("Invalid combo positions or layers.");
+    }
+    const slots = macros.flatMap((macro) =>
+      macro.slot === undefined ? [] : [macro.slot],
+    );
+    if (new Set(slots).size !== slots.length)
+      throw new Error("Duplicate runtime macro slot.");
+    for (const macro of macros) {
+      if (macro.slot === undefined && macro.behaviorId === undefined) {
+        throw new Error("Firmware macro is missing its identity.");
+      }
+      if (macro.behaviorId !== undefined && !behaviors[macro.behaviorId]) {
+        throw new Error("Unknown firmware macro behavior.");
+      }
+      for (const step of macro.steps) {
+        if ("binding" in step) checkBinding(step.binding);
+      }
     }
   }
   return {
@@ -241,6 +332,8 @@ export function parseConfiguration(frames: unknown[]): ViewerConfiguration {
     layers,
     behaviors,
     combos,
+    macros,
+    capabilities,
   };
 }
 
@@ -309,6 +402,29 @@ export function keyValue(output: number): string {
   ].join("+");
 }
 
+export function shiftedKeyValue(output: number): string | undefined {
+  const base = output & 0x00ffffff;
+  const id = base & 0xffff;
+  // Printable US legends only; Ctrl/Alt/GUI chords are not text characters.
+  if (base >>> 16 !== 7 || ((output >>> 24) & ~0x22) !== 0) return;
+  if (id >= 4 && id <= 29) return String.fromCharCode(65 + id - 4);
+  if (id >= 0x1e && id <= 0x27) return "!@#$%^&*()"[id - 0x1e];
+  const punctuation: Record<number, string> = {
+    0x2d: "_",
+    0x2e: "+",
+    0x2f: "{",
+    0x30: "}",
+    0x31: "|",
+    0x33: ":",
+    0x34: '"',
+    0x35: "~",
+    0x36: "<",
+    0x37: ">",
+    0x38: "?",
+  };
+  return punctuation[id];
+}
+
 export function bindingLabel(
   config: ViewerConfiguration,
   value: Binding,
@@ -327,11 +443,16 @@ export function bindingLabel(
     return bindingLabel(config, [child[0], parameter, child[2]], depth + 1);
   };
   switch (behavior.kind) {
-    case "key":
-      return { tap: keyValue(param1) };
+    case "key": {
+      const shifted = shiftedKeyValue(param1);
+      return {
+        tap: keyValue(param1),
+        ...(shifted === undefined ? {} : { shifted }),
+      };
+    }
     case "hold-tap":
       return {
-        tap: childLabel(1, param2).tap,
+        ...childLabel(1, param2),
         hold: childLabel(0, param1).tap,
       };
     case "momentary-layer":
@@ -352,6 +473,18 @@ export function bindingLabel(
           behavior.children
             .map((child) => bindingLabel(config, child, depth + 1).tap)
             .join(" / ") || behavior.name,
+      };
+    case "runtime-macro":
+      return {
+        tap:
+          config.macros.find((macro) => macro.slot === param1)?.name ??
+          `Empty macro ${param1}`,
+      };
+    case "macro":
+      return {
+        tap:
+          config.macros.find((macro) => macro.behaviorId === id)?.name ??
+          behavior.name,
       };
     case "mouse":
       return { tap: `Mouse ${param1}` };
@@ -403,6 +536,7 @@ export function viewerBounds(config: ViewerConfiguration) {
 export interface ViewerShortcuts {
   display: boolean;
   combos: boolean;
+  macros: boolean;
 }
 
 function tapUsage(
@@ -436,6 +570,7 @@ export function viewerShortcuts(
   return {
     display: pressed.has(0x7002c) && pressed.has(0x7002a),
     combos: pressed.has(0x7002b) && pressed.has(0x70028),
+    macros: pressed.has(0x70029) && pressed.has(0x7004c),
   };
 }
 
@@ -446,7 +581,26 @@ export function viewerShortcutEdges(
   return {
     display: next.display && !previous.display,
     combos: next.combos && !previous.combos,
+    macros: next.macros && !previous.macros,
   };
+}
+
+export type ViewerPanel = "combos" | "macros" | undefined;
+
+export function toggleViewerPanel(
+  current: ViewerPanel,
+  requested: Exclude<ViewerPanel, undefined>,
+): ViewerPanel {
+  return current === requested ? undefined : requested;
+}
+
+export function macroStepLabel(
+  config: ViewerConfiguration,
+  step: ViewerMacroStep,
+): string {
+  if (step.kind === "delay") return `Wait ${step.delayMs} ms`;
+  if (step.kind === "pause-for-release") return "Wait for trigger release";
+  return `${step.kind}: ${bindingLabel(config, step.binding).tap}`;
 }
 
 export function viewerOverlaySize(

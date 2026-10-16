@@ -1,4 +1,6 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useContext, useEffect, useMemo, useRef, useState } from "react";
+import { RuntimeContext } from "../runtime/context";
+import { runtimeMacroBehavior } from "../runtime/model";
 import {
   GetBehaviorDetailsResponse,
   BehaviorBindingParametersSet,
@@ -43,6 +45,10 @@ export const BehaviorBindingPicker = ({
   onBindingChanged,
   isDisabled = false,
 }: BehaviorBindingPickerProps) => {
+  const runtime = useContext(RuntimeContext);
+  const macroBehaviorId = runtimeMacroBehavior(
+    Object.fromEntries(behaviors.map((behavior) => [behavior.id, behavior])),
+  );
   const [behaviorId, setBehaviorId] = useState(binding.behaviorId);
   const [param1, setParam1] = useState<number | undefined>(binding.param1);
   const [param2, setParam2] = useState<number | undefined>(binding.param2);
@@ -112,6 +118,33 @@ export const BehaviorBindingPicker = ({
 
   return (
     <fieldset disabled={isDisabled} className="flex flex-col gap-2 min-w-0">
+      {macroBehaviorId !== undefined && runtime.snapshot.macros && (
+        <label>
+          Named runtime macro
+          <select
+            aria-label="Named runtime macro"
+            className="h-8 rounded ml-2"
+            value={behaviorId === macroBehaviorId ? param1 : ""}
+            onChange={(event) => {
+              dirty.current = false;
+              onBindingChanged({
+                behaviorId: macroBehaviorId,
+                param1: Number(event.target.value),
+                param2: 0,
+              });
+            }}
+          >
+            <option value="" disabled>
+              Choose a runtime macro
+            </option>
+            {runtime.snapshot.macros.definitions.map((definition) => (
+              <option key={definition.slot} value={definition.slot}>
+                {definition.name} (slot {definition.slot})
+              </option>
+            ))}
+          </select>
+        </label>
+      )}
       <div
         className="flex gap-2 items-center"
         role="group"
@@ -192,9 +225,10 @@ export const BehaviorBindingPicker = ({
               value={behaviorId}
               className="h-8 rounded"
               onChange={(event) => {
+                const nextId = Number(event.target.value);
                 dirty.current = true;
-                setBehaviorId(Number(event.target.value));
-                setParam1(0);
+                setBehaviorId(nextId);
+                setParam1(nextId === macroBehaviorId ? undefined : 0);
                 setParam2(0);
               }}
             >
@@ -205,7 +239,15 @@ export const BehaviorBindingPicker = ({
               ))}
             </select>
           </div>
-          {metadata && (
+          {behaviorId === macroBehaviorId && (
+            <p>
+              {runtime.snapshot.macros
+                ? "Select a named runtime macro above."
+                : "Runtime macro catalog unavailable; named assignments are disabled."}{" "}
+              Raw slot numbers are not assignable here.
+            </p>
+          )}
+          {metadata && behaviorId !== macroBehaviorId && (
             <BehaviorParametersPicker
               metadata={metadata}
               param1={param1}

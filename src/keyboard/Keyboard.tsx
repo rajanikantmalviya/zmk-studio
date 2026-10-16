@@ -34,6 +34,8 @@ import { deserializeLayoutZoom, LayoutZoom } from "./PhysicalLayout";
 import { useLocalStorageState } from "../misc/useLocalStorageState";
 import { KeymapBackupControls } from "./KeymapBackupControls";
 import { KeyboardOverlayControls } from "../overlay/KeyboardOverlayControls";
+import { RuntimeEditors } from "../runtime/RuntimeEditors";
+import { RuntimeContext } from "../runtime/context";
 
 type BehaviorMap = Record<number, GetBehaviorDetailsResponse>;
 
@@ -65,6 +67,8 @@ function useBehaviors(): BehaviorMap {
       };
 
       let behavior_list = await call_rpc(connection.conn, get_behaviors);
+      if (!behavior_list.behaviors?.listAllBehaviors)
+        throw new Error("Missing behavior discovery response.");
       if (!ignore) {
         let behavior_map: BehaviorMap = {};
         for (let behaviorId of behavior_list.behaviors?.listAllBehaviors
@@ -80,9 +84,11 @@ function useBehaviors(): BehaviorMap {
           let dets: GetBehaviorDetailsResponse | undefined =
             behavior_details?.behaviors?.getBehaviorDetails;
 
-          if (dets) {
-            behavior_map[dets.id] = dets;
-          }
+          if (!dets || dets.id !== behaviorId)
+            throw new Error(
+              `Missing or mismatched behavior details for ${behaviorId}.`,
+            );
+          behavior_map[dets.id] = dets;
         }
 
         if (!ignore) {
@@ -92,7 +98,12 @@ function useBehaviors(): BehaviorMap {
     }
 
     let ignore = false;
-    startRequest();
+    startRequest().catch((error) => {
+      if (!ignore)
+        window.alert(
+          `Could not load behaviors: ${error instanceof Error ? error.message : String(error)}`,
+        );
+    });
 
     return () => {
       ignore = true;
@@ -106,13 +117,13 @@ function useLayouts(): [
   PhysicalLayout[] | undefined,
   React.Dispatch<SetStateAction<PhysicalLayout[] | undefined>>,
   number,
-  React.Dispatch<SetStateAction<number>>
+  React.Dispatch<SetStateAction<number>>,
 ] {
   let connection = useContext(ConnectionContext);
   let lockState = useContext(LockStateContext);
 
   const [layouts, setLayouts] = useState<PhysicalLayout[] | undefined>(
-    undefined
+    undefined,
   );
   const [selectedPhysicalLayoutIndex, setSelectedPhysicalLayoutIndex] =
     useState<number>(0);
@@ -136,17 +147,29 @@ function useLayouts(): [
       let response = await call_rpc(connection.conn, {
         keymap: { getPhysicalLayouts: true },
       });
+      if (
+        !response.keymap?.getPhysicalLayouts ||
+        !response.keymap.getPhysicalLayouts.layouts[
+          response.keymap.getPhysicalLayouts.activeLayoutIndex
+        ]
+      )
+        throw new Error("Missing active physical layout.");
 
       if (!ignore) {
         setLayouts(response?.keymap?.getPhysicalLayouts?.layouts);
         setSelectedPhysicalLayoutIndex(
-          response?.keymap?.getPhysicalLayouts?.activeLayoutIndex || 0
+          response?.keymap?.getPhysicalLayouts?.activeLayoutIndex || 0,
         );
       }
     }
 
     let ignore = false;
-    startRequest();
+    startRequest().catch((error) => {
+      if (!ignore)
+        window.alert(
+          `Could not load physical layouts: ${error instanceof Error ? error.message : String(error)}`,
+        );
+    });
 
     return () => {
       ignore = true;
@@ -161,7 +184,12 @@ function useLayouts(): [
   ];
 }
 
-export default function Keyboard({ deviceName = "zmk" }: { deviceName?: string }) {
+export default function Keyboard({
+  deviceName = "zmk",
+}: {
+  deviceName?: string;
+}) {
+  const runtime = useContext(RuntimeContext);
   const [
     layouts,
     _setLayouts,
@@ -174,12 +202,16 @@ export default function Keyboard({ deviceName = "zmk" }: { deviceName?: string }
       console.log("Got the keymap!");
       return keymap?.keymap?.getKeymap;
     },
-    true
+    true,
   );
 
-  const [keymapScale, setKeymapScale] = useLocalStorageState<LayoutZoom>("keymapScale", "auto", {
-    deserialize: deserializeLayoutZoom,
-  });
+  const [keymapScale, setKeymapScale] = useLocalStorageState<LayoutZoom>(
+    "keymapScale",
+    "auto",
+    {
+      deserialize: deserializeLayoutZoom,
+    },
+  );
 
   const [selectedLayerIndex, setSelectedLayerIndex] = useState<number>(0);
   const [selectedKeyPosition, setSelectedKeyPosition] = useState<
@@ -213,7 +245,7 @@ export default function Keyboard({ deviceName = "zmk" }: { deviceName?: string }
       } else {
         console.error(
           "Failed to set the active physical layout err:",
-          resp?.keymap?.setActivePhysicalLayout?.err
+          resp?.keymap?.setActivePhysicalLayout?.err,
         );
       }
     }
@@ -232,7 +264,7 @@ export default function Keyboard({ deviceName = "zmk" }: { deviceName?: string }
         };
       });
     },
-    [undoRedo, selectedPhysicalLayoutIndex]
+    [undoRedo, selectedPhysicalLayoutIndex],
   );
 
   const doUpdateBinding = useCallback(
@@ -240,7 +272,7 @@ export default function Keyboard({ deviceName = "zmk" }: { deviceName?: string }
       if (bindingUpdateInProgress.current) return;
       if (!keymap || selectedKeyPosition === undefined) {
         console.error(
-          "Can't update binding without a selected key position and loaded keymap"
+          "Can't update binding without a selected key position and loaded keymap",
         );
         return;
       }
@@ -259,7 +291,9 @@ export default function Keyboard({ deviceName = "zmk" }: { deviceName?: string }
         }
 
         const resp = await call_rpc(conn.conn, {
-          keymap: { setLayerBinding: { layerId, keyPosition, binding: newBinding } },
+          keymap: {
+            setLayerBinding: { layerId, keyPosition, binding: newBinding },
+          },
         });
 
         if (
@@ -269,10 +303,12 @@ export default function Keyboard({ deviceName = "zmk" }: { deviceName?: string }
           setKeymap(
             produce((draft: Keymap | undefined) => {
               if (draft) draft.layers[layer].bindings[keyPosition] = newBinding;
-            })
+            }),
           );
         } else {
-          throw new Error(`Failed to set binding (response ${resp.keymap?.setLayerBinding}).`);
+          throw new Error(
+            `Failed to set binding (response ${resp.keymap?.setLayerBinding}).`,
+          );
         }
       };
 
@@ -295,19 +331,33 @@ export default function Keyboard({ deviceName = "zmk" }: { deviceName?: string }
       } catch (error) {
         console.error("Failed to update key binding", error);
         window.alert(error instanceof Error ? error.message : String(error));
-        setKeymap(produce((draft: Keymap | undefined) => {
-          if (draft) draft.layers[layer].bindings[keyPosition] = { ...oldBinding };
-        }));
+        setKeymap(
+          produce((draft: Keymap | undefined) => {
+            if (draft)
+              draft.layers[layer].bindings[keyPosition] = { ...oldBinding };
+          }),
+        );
       } finally {
         bindingUpdateInProgress.current = false;
         setBindingUpdatePending(false);
       }
     },
-    [conn, keymap, undoRedo, selectedLayerIndex, selectedKeyPosition, setKeymap]
+    [
+      conn,
+      keymap,
+      undoRedo,
+      selectedLayerIndex,
+      selectedKeyPosition,
+      setKeymap,
+    ],
   );
 
   let selectedBinding = useMemo(() => {
-    if (keymap == null || selectedKeyPosition == null || !keymap.layers[selectedLayerIndex]) {
+    if (
+      keymap == null ||
+      selectedKeyPosition == null ||
+      !keymap.layers[selectedLayerIndex]
+    ) {
       return null;
     }
 
@@ -338,7 +388,7 @@ export default function Keyboard({ deviceName = "zmk" }: { deviceName?: string }
         return () => doMove(end, start);
       });
     },
-    [undoRedo]
+    [undoRedo],
   );
 
   const addLayer = useCallback(() => {
@@ -355,7 +405,7 @@ export default function Keyboard({ deviceName = "zmk" }: { deviceName?: string }
           produce((draft: any) => {
             draft.layers.push(resp.keymap!.addLayer!.ok!.layer);
             draft.availableLayers--;
-          })
+          }),
         );
 
         setSelectedLayerIndex(newSelection);
@@ -382,12 +432,12 @@ export default function Keyboard({ deviceName = "zmk" }: { deviceName?: string }
           produce((draft: any) => {
             draft.layers.splice(layerIndex, 1);
             draft.availableLayers++;
-          })
+          }),
         );
       } else {
         console.error("Remove error", resp.keymap?.removeLayer?.err);
         throw new Error(
-          "Failed to remove layer:" + resp.keymap?.removeLayer?.err
+          "Failed to remove layer:" + resp.keymap?.removeLayer?.err,
         );
       }
     }
@@ -416,12 +466,12 @@ export default function Keyboard({ deviceName = "zmk" }: { deviceName?: string }
           produce((draft: any) => {
             draft.layers.splice(layerIndex, 1);
             draft.availableLayers++;
-          })
+          }),
         );
       } else {
         console.error("Remove error", resp.keymap?.removeLayer?.err);
         throw new Error(
-          "Failed to remove layer:" + resp.keymap?.removeLayer?.err
+          "Failed to remove layer:" + resp.keymap?.removeLayer?.err,
         );
       }
     }
@@ -441,13 +491,13 @@ export default function Keyboard({ deviceName = "zmk" }: { deviceName?: string }
           produce((draft: any) => {
             draft.layers.splice(atIndex, 0, resp!.keymap!.restoreLayer!.ok);
             draft.availableLayers--;
-          })
+          }),
         );
         setSelectedLayerIndex(atIndex);
       } else {
         console.error("Remove error", resp.keymap?.restoreLayer?.err);
         throw new Error(
-          "Failed to restore layer:" + resp.keymap?.restoreLayer?.err
+          "Failed to restore layer:" + resp.keymap?.restoreLayer?.err,
         );
       }
     }
@@ -482,14 +532,14 @@ export default function Keyboard({ deviceName = "zmk" }: { deviceName?: string }
           setKeymap(
             produce((draft: any) => {
               const layer_index = draft.layers.findIndex(
-                (l: Layer) => l.id == layerId
+                (l: Layer) => l.id == layerId,
               );
               draft.layers[layer_index].name = name;
-            })
+            }),
           );
         } else {
           throw new Error(
-            "Failed to change layer name:" + resp.keymap?.setLayerProps
+            "Failed to change layer name:" + resp.keymap?.setLayerProps,
           );
         }
       }
@@ -501,7 +551,7 @@ export default function Keyboard({ deviceName = "zmk" }: { deviceName?: string }
         };
       });
     },
-    [conn, undoRedo, keymap]
+    [conn, undoRedo, keymap],
   );
 
   useEffect(() => {
@@ -515,7 +565,11 @@ export default function Keyboard({ deviceName = "zmk" }: { deviceName?: string }
   }, [keymap, selectedLayerIndex]);
 
   return (
-    <div className="grid grid-cols-[auto_1fr] grid-rows-[minmax(0,1fr)_auto] bg-base-300 max-w-full min-w-0 min-h-0">
+    <div
+      aria-busy={runtime.busy}
+      style={{ pointerEvents: runtime.busy ? "none" : undefined }}
+      className="grid grid-cols-[auto_1fr] grid-rows-[minmax(0,1fr)_auto] bg-base-300 max-w-full min-w-0 min-h-0"
+    >
       <div className="p-2 flex flex-col gap-2 bg-base-200 row-span-2 min-h-0 overflow-y-auto">
         {layouts && (
           <div className="col-start-3 row-start-1 row-end-2">
@@ -541,6 +595,13 @@ export default function Keyboard({ deviceName = "zmk" }: { deviceName?: string }
               onLayerNameChanged={changeLayerName}
             />
           </div>
+        )}
+        {keymap && layouts?.[selectedPhysicalLayoutIndex] && (
+          <RuntimeEditors
+            keymap={keymap}
+            layout={layouts[selectedPhysicalLayoutIndex]}
+            behaviors={behaviors}
+          />
         )}
         {keymap && layouts?.[selectedPhysicalLayoutIndex] && (
           <KeymapBackupControls
@@ -594,7 +655,7 @@ export default function Keyboard({ deviceName = "zmk" }: { deviceName?: string }
         <div className="p-2 col-start-2 row-start-2 bg-base-200 min-w-0 max-h-[50vh] overflow-auto">
           <BehaviorBindingPicker
             key={`${selectedLayerIndex}-${selectedKeyPosition}`}
-            isDisabled={bindingUpdatePending}
+            isDisabled={bindingUpdatePending || runtime.busy}
             binding={selectedBinding}
             behaviors={Object.values(behaviors)}
             layers={keymap.layers.map(({ id, name }, li) => ({

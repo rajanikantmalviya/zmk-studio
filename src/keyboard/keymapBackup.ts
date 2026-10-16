@@ -15,6 +15,7 @@ import {
   SetLayerPropsResponse,
 } from "@zmkfirmware/zmk-studio-ts-client/keymap";
 import { validateValue } from "../behaviors/parameters";
+import { parseRuntimeBackup, RuntimeBackup } from "../runtime/backupSchema";
 
 export type BehaviorMap = Record<number, GetBehaviorDetailsResponse>;
 export type KeymapRpc = (
@@ -23,11 +24,12 @@ export type KeymapRpc = (
 
 export interface KeymapBackup {
   format: "zmk-studio-keymap";
-  version: 1;
+  version: 1 | 2;
   deviceName: string;
   physicalLayout: { name: string; keyCount: number };
   behaviors: { id: number; displayName: string }[];
   layers: Layer[];
+  runtime?: RuntimeBackup;
 }
 
 export function createKeymapBackup(
@@ -74,9 +76,11 @@ export function parseKeymapBackup(text: string): KeymapBackup {
   if (
     !record(value) ||
     value.format !== "zmk-studio-keymap" ||
-    value.version !== 1
+    (value.version !== 1 && value.version !== 2)
   ) {
-    throw new Error("Expected a ZMK Studio keymap JSON backup (version 1).");
+    throw new Error(
+      "Expected a ZMK Studio keymap JSON backup (version 1 or 2).",
+    );
   }
   if (
     typeof value.deviceName !== "string" ||
@@ -138,7 +142,7 @@ export function parseKeymapBackup(text: string): KeymapBackup {
   }
   return {
     format: "zmk-studio-keymap",
-    version: 1,
+    version: value.version,
     deviceName: value.deviceName,
     physicalLayout: {
       name: value.physicalLayout.name,
@@ -146,6 +150,9 @@ export function parseKeymapBackup(text: string): KeymapBackup {
     },
     behaviors,
     layers,
+    ...(value.version === 2
+      ? { runtime: parseRuntimeBackup(value.runtime) }
+      : {}),
   };
 }
 
@@ -161,7 +168,7 @@ function parameterSet(
   );
 }
 
-function selectTargetLayers(sources: Layer[], targets: Layer[]) {
+export function selectTargetLayers(sources: Layer[], targets: Layer[]) {
   const reservedIds = new Set(
     sources
       .filter((source) => targets.some((l) => l.id === source.id))
