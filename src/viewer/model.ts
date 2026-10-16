@@ -539,7 +539,7 @@ export interface ViewerShortcuts {
   macros: boolean;
 }
 
-function tapUsage(
+export function tapUsage(
   config: ViewerConfiguration,
   value: Binding,
   depth = 0,

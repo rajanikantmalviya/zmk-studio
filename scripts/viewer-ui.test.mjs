@@ -252,6 +252,187 @@ function fixtureScript() {
 }
 
 test(
+  "learning generates mapping-aware drills, scores focused typing, pauses and retains results",
+  { skip: !browser || !viewerUrl, timeout: 60000 },
+  async () => {
+    const page = await connectPage();
+    const click = (text) =>
+      page.evaluate(
+        `[...document.querySelectorAll('button')].find(button => button.textContent === ${JSON.stringify(text)}).click()`,
+      );
+    const stat = (name) =>
+      page.evaluate(`Array.from(document.querySelectorAll('.learning-stats > div'))
+        .find(item => item.querySelector('dt').textContent === ${JSON.stringify(name)})
+        .querySelector('dd').textContent`);
+    const type = async (key) => {
+      await page.call("Input.dispatchKeyEvent", { type: "keyDown", key });
+      await page.call("Input.dispatchKeyEvent", { type: "keyUp", key });
+    };
+    try {
+      await page.call("Page.enable");
+      await page.call("Page.addScriptToEvaluateOnNewDocument", {
+        source: `(${fixtureScript.toString()})()`,
+      });
+      await page.call("Page.navigate", { url: viewerUrl });
+      await page.waitFor(
+        `document.querySelector('select[aria-label="Viewer USB port"]')?.value === 'FIXTURE'`,
+      );
+      await click("Connect");
+      await page.waitFor(`document.querySelector('.viewer-keyboard')`);
+      await page.evaluate(`(() => {
+        viewerFixture.clock = 0;
+        Object.defineProperty(performance, 'now', {value: () => viewerFixture.clock});
+        const frames = structuredClone(viewerFixture.frames);
+        frames.find(frame => frame.type === 'layer').bindings =
+          [0x70004,0x70017,0x70008,0x7002c,0x7002a,0x7001e]
+            .map(usage => [1,usage,0]);
+        viewerFixture.learningFrames = frames;
+        viewerFixture.emit('viewer-configuration', {
+          connectionId:42, frames,
+          initialState:{type:'state',sequence:3,pressed:[],released:[],layers:[0]},
+        });
+        viewerFixture.emit('viewer-controls', null);
+      })()`);
+      await click("Learn");
+      await page.waitFor(
+        `document.querySelector('[aria-label="Learning mode"]')`,
+      );
+      assert.equal(
+        await page.evaluate(
+          `document.querySelector('main').classList.contains('typing-overlay')`,
+        ),
+        false,
+      );
+      await click("Start session");
+      await page.waitFor(
+        `document.activeElement?.getAttribute('aria-label') === 'Practice typing'`,
+      );
+      assert.equal(
+        await page.evaluate(
+          `document.querySelectorAll('.key-learning').length`,
+        ),
+        1,
+      );
+      assert.equal(
+        await page.evaluate(`(() => {
+          const key = document.querySelector('.key-learning').getBoundingClientRect();
+          return key.top >= 0 && key.bottom <= innerHeight;
+        })()`),
+        true,
+      );
+      const passage = await page.evaluate(
+        `document.querySelector('.learning-prompt').textContent`,
+      );
+      assert.ok(
+        [...passage.replaceAll("\u2423", " ")].every((key) =>
+          "ate 1".includes(key),
+        ),
+      );
+      assert.ok("ate1".split("").every((key) => passage.includes(key)));
+      await page.evaluate(`viewerFixture.clock = 10000`);
+      await type("z");
+      assert.equal(await stat("Correct / mistakes"), "0 / 1");
+      const expected = await page.evaluate(
+        `document.querySelector('.learning-prompt mark').textContent`,
+      );
+      await type(expected === "\u2423" ? " " : expected);
+      assert.equal(await stat("Correct / mistakes"), "1 / 1");
+      assert.equal(await stat("Session WPM"), "1.2");
+      assert.equal(await stat("Last 1 minute WPM"), "1.2");
+      assert.equal(await stat("Last 2 minutes WPM"), "1.2");
+      assert.equal(await stat("Accuracy"), "50.0%");
+      await page.evaluate(`(() => {
+        const field = document.querySelector('[aria-label="Practice typing"]');
+        field.dispatchEvent(new KeyboardEvent('keydown', {key:'a',repeat:true,bubbles:true}));
+        field.dispatchEvent(new ClipboardEvent('paste', {bubbles:true,cancelable:true}));
+        viewerFixture.state([3,4]);
+      })()`);
+      assert.equal(await stat("Correct / mistakes"), "1 / 1");
+      assert.equal(
+        await page.evaluate(
+          `document.querySelector('[aria-label="Learning mode"]') !== null`,
+        ),
+        true,
+      );
+      assert.equal(
+        await page.evaluate(
+          `viewerFixture.native.calls.some(call => call.command === 'viewer_toggle_display')`,
+        ),
+        false,
+      );
+      await page.evaluate(
+        `window.dispatchEvent(new Event('blur')); viewerFixture.clock = 90000`,
+      );
+      await page.waitFor(
+        `document.querySelector('.learning-actions').textContent.includes('Paused')`,
+      );
+      assert.equal(await stat("Active time"), "10s");
+      await click("Resume");
+      await page.evaluate(`viewerFixture.clock = 100000`);
+      await page.waitFor(
+        `document.querySelector('.learning-stats').textContent.includes('20s')`,
+      );
+      await click("Finish session");
+      assert.equal(await stat("Session WPM"), "0.6");
+      await page.waitFor(
+        `document.querySelector('.learning-actions').textContent.includes('Session complete')`,
+      );
+      assert.equal(
+        await page.evaluate(
+          `document.querySelectorAll('.key-learning').length`,
+        ),
+        0,
+      );
+      await page.evaluate(`(() => {
+        const select = document.querySelector('.learning-options select');
+        select.value = 'words';
+        select.dispatchEvent(new Event('change',{bubbles:true}));
+      })()`);
+      await click("New session");
+      const wordPassage = await page.evaluate(
+        `document.querySelector('.learning-prompt').textContent.replaceAll('\\u2423',' ')`,
+      );
+      assert.equal(wordPassage.trim().split(" ").length, 12);
+      assert.ok([...wordPassage].every((key) => "ate ".includes(key)));
+      await page.evaluate(`viewerFixture.clock = 220000`);
+      await page.waitFor(
+        `document.querySelector('.learning-actions').textContent.includes('Session complete')`,
+      );
+      assert.equal(await stat("Active time"), "120s");
+      await click("New session");
+      await page.evaluate(`viewerFixture.emit('viewer-configuration', {
+        connectionId:42, frames:viewerFixture.learningFrames,
+        initialState:{type:'state',sequence:4,pressed:[],released:[],layers:[0]},
+      })`);
+      await page.waitFor(
+        `document.querySelector('.learning-actions').textContent.includes('Ready to learn')`,
+      );
+      assert.equal(await stat("Correct / mistakes"), "0 / 0");
+      await click("Close learning");
+      assert.equal(
+        await page.evaluate(
+          `document.querySelector('[aria-label="Learning mode"]')`,
+        ),
+        null,
+      );
+      await click("Learn");
+      await click("Disconnect");
+      await page.waitFor(
+        `!document.querySelector('[aria-label="Learning mode"]')`,
+      );
+      assert.equal(
+        await page.evaluate(
+          `document.querySelector('[role="alert"]')?.textContent`,
+        ),
+        undefined,
+      );
+    } finally {
+      await page.close();
+    }
+  },
+);
+
+test(
   "viewer places shifted legends in the upper-right without replacing tap or hold labels",
   { skip: !browser || !viewerUrl, timeout: 30000 },
   async () => {

@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, UnlistenFn } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { LearningPanel } from "./LearningPanel";
 import {
   bindingLabel,
   displayedKeys,
@@ -51,6 +52,10 @@ export function ViewerApp() {
   const [transport, setTransport] = useState<"usb" | "ble">("usb");
   const [onTop, setOnTop] = useState(true);
   const [typing, setTyping] = useState(false);
+  const [learning, setLearning] = useState(false);
+  const [learningHint, setLearningHint] = useState<number>();
+  const learningActive = useRef(false);
+  learningActive.current = learning;
   const [combosHeight, setCombosHeight] = useState(0);
   const combosPanel = useRef<HTMLElement>(null);
   const shortcuts = useRef<ViewerShortcuts>({
@@ -97,6 +102,7 @@ export function ViewerApp() {
   }, [report, transport]);
   const togglePanel = useCallback(
     (requested: Exclude<ViewerPanel, undefined>) => {
+      setLearning(false);
       setPanel((previous) => toggleViewerPanel(previous, requested));
       setTyping(true);
     },
@@ -107,6 +113,7 @@ export function ViewerApp() {
       const held = viewerShortcuts(current, next);
       const edges = viewerShortcutEdges(shortcuts.current, held);
       shortcuts.current = held;
+      if (learningActive.current) return;
       if (edges.display) invoke("viewer_toggle_display").catch(report);
       if (edges.combos) togglePanel("combos");
       if (edges.macros) togglePanel("macros");
@@ -125,7 +132,10 @@ export function ViewerApp() {
       for (const subscribe of [
         () =>
           listen("viewer-hidden", () => {
-            if (!disposed) setPanel(undefined);
+            if (!disposed) {
+              setPanel(undefined);
+              setLearning(false);
+            }
           }),
         () =>
           listen("viewer-controls", () => {
@@ -134,6 +144,7 @@ export function ViewerApp() {
         () =>
           listen("viewer-display", () => {
             if (!disposed && configuration.current) {
+              setLearning(false);
               setPanel(undefined);
               setTyping(true);
             }
@@ -330,6 +341,9 @@ export function ViewerApp() {
 
   const bounds = config && viewerBounds(config);
   useEffect(() => {
+    if (!config) setLearning(false);
+  }, [config]);
+  useEffect(() => {
     const panel = combosPanel.current;
     if (!panel) {
       setCombosHeight(0);
@@ -383,7 +397,9 @@ export function ViewerApp() {
     (candidate) => candidate.id === snapshot?.layers[0],
   );
   return (
-    <main className={`viewer${overlayActive ? " typing-overlay" : ""}`}>
+    <main
+      className={`viewer${overlayActive ? " typing-overlay" : ""}${learning ? " learning-mode" : ""}`}
+    >
       <header>
         <button
           className="viewer-drag"
@@ -456,6 +472,7 @@ export function ViewerApp() {
             <button
               disabled={busy}
               onClick={() => {
+                setLearning(false);
                 setPanel(undefined);
                 setTyping(true);
               }}
@@ -464,6 +481,17 @@ export function ViewerApp() {
               Typing overlay
             </button>
           )}
+          <button
+            disabled={!config}
+            aria-pressed={learning}
+            onClick={() => {
+              setLearning((previous) => !previous);
+              setPanel(undefined);
+              setTyping(false);
+            }}
+          >
+            Learn
+          </button>
           <button
             aria-label="Decrease keyboard size"
             disabled={size <= 10}
@@ -549,13 +577,16 @@ export function ViewerApp() {
               <g
                 key={key.position}
                 transform={`rotate(${key.r} ${key.rx} ${key.ry})`}
-                className={
+                className={[
                   key.pressed
                     ? "key-down"
                     : released.has(key.position)
                       ? "key-released"
-                      : ""
-                }
+                      : "",
+                  learning && key.position === learningHint
+                    ? "key-learning"
+                    : "",
+                ].join(" ")}
               >
                 <title>
                   {key.hold ? `Tap: ${key.tap}; Hold: ${key.hold}` : key.tap}
@@ -607,6 +638,13 @@ export function ViewerApp() {
             ))}
           </svg>
         </div>
+      )}
+      {config && learning && (
+        <LearningPanel
+          config={config}
+          onHint={setLearningHint}
+          onClose={() => setLearning(false)}
+        />
       )}
       {config && overlayActive && (
         <div className="viewer-layer-label">
@@ -751,11 +789,13 @@ export function ViewerApp() {
       )}
       {config && (
         <footer>
-          Display only - green: held physical key; blue: released. Layers follow
-          firmware.
+          Read-only keymap - green: held physical key; blue: released. Layers
+          follow firmware.
           <span>
-            Space+Backspace: show/hide display. Tab+Return: combos. Esc+Delete:
-            macros. Right-click the ZMK tray icon for controls or to exit.
+            {learning
+              ? "Viewer keyboard shortcuts are disabled during learning."
+              : "Space+Backspace: show/hide display. Tab+Return: combos. Esc+Delete: macros."}{" "}
+            Right-click the ZMK tray icon for controls or to exit.
           </span>
           <button
             disabled={busy}

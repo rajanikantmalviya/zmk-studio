@@ -85,6 +85,36 @@ Compiled scopes may also include inactive indices; those bits are retained in
 runtime edits and backups, and the viewer labels them explicitly.
 No typed-text log is recorded.
 
+### Learning mode
+
+Open **Show controls** from the tray, then choose **Learn**. The focused
+learning panel generates **Guided key drills** or **Typing practice** from the
+loaded keymap. Select a practice layer and a 1-, 2-, or 5-minute session.
+Drills cover mapped printable key taps, including hold-tap tap values and
+transparent fallback to the default layer. Optional Shift characters are
+included when that layer has a Shift key or Shift hold-tap. Typing practice
+uses words that can be spelled with mapped letters and Space, falling back to
+character groups on limited or symbol-only layouts. Combos, macros and
+non-text actions are excluded; character generation assumes a **US host layout**.
+Activate the selected layer yourself; the viewer never changes your keyboard.
+
+Choose **Start session**, then type the highlighted character in the practice
+field. **Key hints** outline its physical position on the keyboard and identify
+the selected layer and any required Shift. Mistakes count toward accuracy but
+do not advance the passage; paste and held-key repeat do not count.
+Passages regenerate as you finish them until the session ends.
+
+The panel shows **session-average WPM**, **last 1 minute WPM**, and **last
+2 minutes WPM**, plus accuracy, active time and correct/mistake counts.
+WPM is correct characters divided by five per active minute. Before a rolling
+window fills, it uses the elapsed active time rather than a full minute or two.
+**Pause / Resume** excludes paused time; switching to another window or hiding
+the page pauses automatically. **Finish session** keeps the current results.
+The normal viewer keyboard shortcuts are disabled in learning mode.
+Results are in memory only and reset on a new session, keymap refresh,
+disconnect, or leaving learning mode (including hiding the viewer or switching
+to the typing overlay). No typing history is stored or sent anywhere.
+
 Telemetry is host-requested over USB at up to 40 snapshots/second, using a
 low-priority firmware worker with bounded buffering. Exiting the viewer stops
 requests and releases its port. Firmware input is never delayed waiting for

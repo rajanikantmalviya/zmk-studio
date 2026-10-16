@@ -189,3 +189,92 @@ footer {
   color: #94a3b8;
   font-size: 11px;
 }
+.viewer-learning {
+  margin-top: 12px;
+  border: 1px solid #475569;
+  border-radius: 8px;
+  padding: 16px;
+  background: #0f172a;
+}
+.learning-mode .viewer-keyboard-scroll {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  max-height: 32vh;
+  background: #111827;
+}
+.learning-mode .viewer-keyboard {
+  max-height: 28vh;
+}
+.viewer-learning p {
+  line-height: 1.5;
+}
+.learning-options,
+.learning-actions,
+.learning-stats {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+}
+.learning-options label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.learning-stats > div {
+  min-width: 120px;
+  padding: 10px;
+  border-radius: 6px;
+  background: #1e293b;
+}
+.learning-stats dt {
+  color: #cbd5e1;
+}
+.learning-stats dd {
+  margin: 4px 0 0;
+  font-size: 22px;
+  font-variant-numeric: tabular-nums;
+}
+.learning-prompt {
+  position: relative;
+  max-height: 160px;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-family: ui-monospace, monospace;
+  font-size: 22px;
+  letter-spacing: 1px;
+}
+.learning-completed {
+  color: #86efac;
+}
+.learning-prompt mark {
+  background: #fcd34d;
+  color: #111827;
+  border-radius: 2px;
+}
+.learning-hint {
+  color: #fde68a;
+}
+.learning-input {
+  width: 100%;
+  padding: 10px;
+  border: 1px solid #64748b;
+  border-radius: 5px;
+  color: inherit;
+  background: #1e293b;
+  font: inherit;
+}
+.learning-input:focus-visible {
+  outline: 2px solid #fcd34d;
+}
+.learning-feedback {
+  color: #fca5a5;
+  min-height: 1.5em;
+}
+.viewer-keyboard .key-learning rect {
+  stroke: #fcd34d;
+  stroke-width: 0.06;
+  stroke-dasharray: 0.12 0.05;
+}
